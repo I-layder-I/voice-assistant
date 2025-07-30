@@ -323,40 +323,60 @@ std::vector<std::string> VoiceAssistantWorker::extractKeywordsFromScript(const s
     return keywords;
 }
 
-void VoiceAssistantWorker::loadCommands() {
+void VoiceAssistantWorker::loadCommands() 
+{
     commands.clear();
-    
-    if (!fileExists("commands")) {
+
+    // Определяем путь к директории команд и присваиваем значение переменной-члену класса
+    if (QCoreApplication::applicationFilePath() == "/usr/local/bin/voice-assistant") {
+        this->ComPath = "/usr/local/bin/voice-assistant/commands";
+    } else {
+        this->ComPath = "commands";
+    }
+
+    // Проверяем существование директории (std::string передается напрямую)
+    if (!fileExists(this->ComPath)) {
         // Создаем директорию commands
-        mkdir("commands", 0755);
-        emit logMessage("Создана директория 'commands'");
+        // mkdir требует const char*, используем .c_str()
+        int mkdir_result = mkdir(this->ComPath.c_str(), 0755);
+        if (mkdir_result == 0) {
+             // Для logMessage, который, судя по ошибкам, принимает QString,
+             // преобразуем std::string в QString
+             emit logMessage(QString("Создана директория %1").arg(QString::fromStdString(this->ComPath)));
+             // Или так: emit logMessage("Создана директория " + QString::fromStdString(this->ComPath));
+        } else {
+             emit logMessage(QString("Не удалось создать директорию %1").arg(QString::fromStdString(this->ComPath)));
+             // Или так: emit logMessage("Не удалось создать директорию " + QString::fromStdString(this->ComPath));
+        }
         emit logMessage("Поместите сюда bash скрипты с ключевыми словами в комментариях");
         return;
     }
-    
-    // Получаем список файлов в директории commands
-    std::vector<std::string> files = getFilesInDirectory("commands");
-    
+
+    // Получаем список файлов в директории commands (std::string передается напрямую)
+    std::vector<std::string> files = getFilesInDirectory(this->ComPath);
+
     // Проходим по всем .sh файлам
     for (const auto& filepath : files) {
+        // Проверяем расширение файла (предполагается, что getFileExtension принимает std::string)
         if (getFileExtension(filepath) == ".sh") {
+            // Получаем имя скрипта без расширения (предполагается, что getFilenameWithoutExtension принимает std::string)
             std::string script_name = getFilenameWithoutExtension(filepath);
-            
-            // Извлекаем ключевые слова
+            // Извлекаем ключевые слова из скрипта (предполагается, что extractKeywordsFromScript принимает std::string)
             std::vector<std::string> keywords = extractKeywordsFromScript(filepath);
-            
             if (!keywords.empty()) {
+                // Создаем структуру CommandInfo и заполняем её
                 CommandInfo cmd_info;
                 cmd_info.script_name = script_name;
                 cmd_info.keywords = keywords;
                 commands.push_back(cmd_info);
-                
+
+                // Формируем строку с ключевыми словами для лога
                 QString keywords_str;
-                for (size_t i = 0; i < keywords.size(); i++) {
+                for (size_t i = 0; i < keywords.size(); ++i) {
                     keywords_str += QString::fromStdString(keywords[i]);
                     if (i < keywords.size() - 1) keywords_str += ", ";
                 }
-                
+                // Логируем загруженную команду
                 emit logMessage(QString("Загружена команда: %1 (%2)")
                                .arg(QString::fromStdString(script_name))
                                .arg(keywords_str));
@@ -382,7 +402,7 @@ std::string VoiceAssistantWorker::findCommandForText(const std::string& recogniz
 }
 
 bool VoiceAssistantWorker::executeCommandScript(const std::string& command_name) {
-    std::string script_path = "commands/" + command_name + ".sh";
+    std::string script_path = this->ComPath + "/" + command_name + ".sh";
     
     if (fileExists(script_path)) {
         emit logMessage(QString("Выполняю скрипт: %1").arg(QString::fromStdString(script_path)));

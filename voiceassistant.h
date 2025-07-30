@@ -53,6 +53,7 @@ private:
     VoskRecognizer *recognizer;
     std::vector<CommandInfo> commands;
     QTimer *processTimer;
+    std::string ComPath;
 };
 
 // --- Добавляем объявление свободной функции ВНЕ класса ---

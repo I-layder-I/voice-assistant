@@ -54,7 +54,7 @@ private:
 
     // --- Добавленные/измененные приватные члены для автозапуска ---
     QString generateDesktopFileContent() const;
-    const QString autostartFilePath = QDir::homePath() + "/.config/autostart/voice-assistant-gui.desktop";
+    const QString autostartFilePath = QDir::homePath() + "/.config/autostart/voice-assistant.desktop";
     // const QString desktopExecPath = QCoreApplication::applicationFilePath(); // Удалено, путь генерируется динамически
     // --- ---
     

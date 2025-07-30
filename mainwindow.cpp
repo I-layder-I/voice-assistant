@@ -313,8 +313,8 @@ QString MainWindow::generateSystemDesktopFileContent(const QString& execPath) co
 }
 
 bool MainWindow::isInstalled() const {
-    QFileInfo systemBinary("/usr/local/bin/voice_assistant_gui");
-    QFileInfo systemDesktop("/usr/local/share/applications/voice-assistant-gui.desktop");
+    QFileInfo systemBinary("/usr/local/bin/voice-assistant");
+    QFileInfo systemDesktop("/usr/local/share/applications/voice-assistant.desktop");
     return systemBinary.exists() && systemDesktop.exists();
 }
 
@@ -322,7 +322,7 @@ void MainWindow::onInstallClicked() {
     QString program = "pkexec";
     QStringList arguments;
 
-    QString scriptPath = QDir::tempPath() + "/install_voice_assistant.sh";
+    QString scriptPath = QDir::tempPath() + "/install_voice-assistant.sh";
     QFile scriptFile(scriptPath);
     if (!scriptFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
         QMessageBox::warning(this, "Ошибка", "Не удалось создать временный скрипт установки.");
@@ -336,7 +336,12 @@ void MainWindow::onInstallClicked() {
 
     // --- Копирование исполняемого файла ---
     out << "echo \"Копирование исполняемого файла...\"\n";
-    out << "cp \"" << QCoreApplication::applicationFilePath() << "\" /usr/local/bin/voice_assistant_gui\n";
+    out << "cp \"" << QCoreApplication::applicationFilePath() << "\" /usr/local/bin/voice-assistant\n";
+    
+    out << "mkdir -p \"/home/$(logname)/.config/voice-assistant\"\n";
+    out << "mkdir -p \"/home/$(logname)/.config/voice-assistant/commands\"\n";
+    out << "cp /home/$(logname)/Programs/voice-assistant/commands/* /home/$(logname)/.config/voice-assistant/commands\n";
+    out << "chown -R layder:layder \"/home/layder/.config/voice-assistant\"\n";
 
     // --- Копирование библиотеки libvosk.so ---
     // Предполагаем, что libvosk.so находится рядом с запущенным исполняемым файлом
@@ -349,13 +354,13 @@ void MainWindow::onInstallClicked() {
     out << "echo \"Создание директории для данных...\"\n";
     out << "mkdir -p /usr/local/share/voice-assistant\n";
     out << "echo \"Копирование модели Vosk...\"\n";
-    out << "cp -r \"" << appDirPath << "/model\" /usr/local/share/voice-assistant/model_\n";
-    out << "mv /usr/local/share/voice-assistant/model_ /usr/local/share/voice-assistant/model\n";
-    out << "chmod -R 644 /usr/local/share/voice-assistant/model\n"; // Установка стандартных прав на файлы в модели
+    out << "cp -r \"" << appDirPath << "/model\" /usr/local/share/voice-assistant/model\n";
+    // out << "mv /usr/local/share/voice-assistant/model_ /usr/local/share/voice-assistant/model\n";
+    // out << "chmod -R 644 /usr/local/share/voice-assistant/model\n"; // Установка стандартных прав на файлы в модели
 
     // --- Установка прав ---
     out << "echo \"Установка прав на выполнение...\"\n";
-    out << "chmod 755 /usr/local/bin/voice_assistant_gui\n";
+    out << "chmod 755 /usr/local/bin/voice-assistant\n";
     out << "chmod 644 /usr/local/lib/libvosk.so\n"; // Стандартные права для библиотеки
 
     // --- Обновление кэша библиотек ---
@@ -366,16 +371,16 @@ void MainWindow::onInstallClicked() {
     out << "echo \"Создание директории для .desktop файлов...\"\n";
     out << "mkdir -p /usr/local/share/applications\n";
     out << "echo \"Создание системного .desktop файла...\"\n";
-    QString desktopContent = generateSystemDesktopFileContent("/usr/local/bin/voice_assistant_gui");
+    QString desktopContent = generateSystemDesktopFileContent("/usr/local/bin/voice-assistant");
     QStringList lines = desktopContent.split('\n');
-    out << "cat > /usr/local/share/applications/voice-assistant-gui.desktop << 'EOF'\n";
+    out << "cat > /usr/local/share/applications/voice-assistant.desktop << 'EOF'\n";
     for (const QString& line : lines) {
         if (!line.isEmpty()) {
             out << line << "\n";
         }
     }
     out << "EOF\n";
-    out << "chmod 644 /usr/local/share/applications/voice-assistant-gui.desktop\n";
+    out << "chmod 644 /usr/local/share/applications/voice-assistant.desktop\n";
 
     out << "echo \"Установка завершена успешно!\"\n";
     out << "exit 0\n";
@@ -434,10 +439,10 @@ void MainWindow::onUninstallClicked() {
     int ret = QMessageBox::question(this, "Подтверждение",
         "Вы уверены, что хотите удалить Голосовой Ассистент из системы?\n"
         "Будут удалены:\n"
-        "- /usr/local/bin/voice_assistant_gui\n"
+        "- /usr/local/bin/voice-assistant\n"
         "- /usr/local/lib/libvosk.so\n"
         "- /usr/local/share/voice-assistant/model\n" // Добавлено
-        "- /usr/local/share/applications/voice-assistant-gui.desktop",
+        "- /usr/local/share/applications/voice-assistant.desktop",
         QMessageBox::Yes | QMessageBox::No);
 
     if (ret != QMessageBox::Yes) {
@@ -447,7 +452,7 @@ void MainWindow::onUninstallClicked() {
     QString program = "pkexec";
     QStringList arguments;
 
-    QString scriptPath = QDir::tempPath() + "/uninstall_voice_assistant.sh";
+    QString scriptPath = QDir::tempPath() + "/uninstall_voice-assistant.sh";
     QFile scriptFile(scriptPath);
     if (!scriptFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
         QMessageBox::warning(this, "Ошибка", "Не удалось создать временный скрипт удаления.");
@@ -461,7 +466,7 @@ void MainWindow::onUninstallClicked() {
 
     // --- Удаление файлов ---
     out << "echo \"Удаление исполняемого файла...\"\n";
-    out << "rm -f /usr/local/bin/voice_assistant_gui\n";
+    out << "rm -f /usr/local/bin/voice-assistant\n";
 
     out << "echo \"Удаление библиотеки libvosk.so...\"\n";
     out << "rm -f /usr/local/lib/libvosk.so\n";
@@ -473,7 +478,7 @@ void MainWindow::onUninstallClicked() {
     out << "ldconfig\n";
 
     out << "echo \"Удаление .desktop файла...\"\n";
-    out << "rm -f /usr/local/share/applications/voice-assistant-gui.desktop\n";
+    out << "rm -f /usr/local/share/applications/voice-assistant.desktop\n";
 
     out << "echo \"Удаление завершено успешно!\"\n";
     out << "exit 0\n";
