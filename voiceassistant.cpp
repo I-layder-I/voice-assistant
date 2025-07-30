@@ -329,7 +329,7 @@ void VoiceAssistantWorker::loadCommands()
 
     // Определяем путь к директории команд и присваиваем значение переменной-члену класса
     if (QCoreApplication::applicationFilePath() == "/usr/local/bin/voice-assistant") {
-        this->ComPath = "/usr/local/bin/voice-assistant/commands";
+        this->ComPath = (QDir::homePath() + "/.config/voice-assistant/commands").toStdString();
     } else {
         this->ComPath = "commands";
     }
