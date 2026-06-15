@@ -3,14 +3,16 @@
 #include <alsa/asoundlib.h>
 #include <atomic>
 #include <cctype>
-#include <chrono>
+#include <csignal>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <sys/wait.h>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 using namespace std;
@@ -20,6 +22,7 @@ namespace fs = std::filesystem;
 #define BUFFER_SIZE 8000
 
 string findModelPath();
+void signalHandler(int);
 struct CommandInfo;
 
 class VoiceAssistantWorker {
@@ -29,20 +32,6 @@ public:
         capture_handle(nullptr), alsa_initialized(false) {}
 
   ~VoiceAssistantWorker() { stop(); }
-
-private:
-  atomic<bool> running;
-
-  VoskModel *model;
-  VoskRecognizer *recognizer;
-
-  vector<CommandInfo> commands;
-  fs::path ComPath;
-
-  snd_pcm_t *capture_handle;
-  bool alsa_initialized;
-
-public:
   bool executeCommandScript(const string &command_name);
   string extractTextFromJson(const string &json);
   vector<string> getFilesInDirectory(const fs::path &dir);
@@ -54,53 +43,72 @@ public:
   void start();
   void stop();
   void run();
+  void init();
+  void loop();
+
+private:
+  VoiceAssistantWorker(const VoiceAssistantWorker &) = delete;
+  VoiceAssistantWorker &operator=(const VoiceAssistantWorker &) = delete;
+
+  atomic<bool> running;
+
+  VoskModel *model;
+  VoskRecognizer *recognizer;
+
+  vector<CommandInfo> commands;
+  fs::path ComPath;
+  snd_pcm_t *capture_handle;
+  bool alsa_initialized;
+  thread t;
 };
 
 class VoiceAssistant {
   VoiceAssistantWorker worker;
-  thread t;
 
 public:
-  void start() {
-    t = thread([this] { worker.start(); });
-  }
+  void start() { worker.start(); }
 
-  void stop() {
-    worker.stop();
-    if (t.joinable())
-      t.join();
-  }
+  void stop() { worker.stop(); }
 
   ~VoiceAssistant() { stop(); }
 };
 
+VoiceAssistant *g_assistant = nullptr;
+
 int main() {
   VoiceAssistant a;
+  g_assistant = &a;
+  signal(SIGINT, signalHandler);
+  signal(SIGTERM, signalHandler);
+
   a.start();
-
-  cout << "Enter для выхода...\n";
+  cout << "Press Enter to exit...\n";
   cin.get();
-
   a.stop();
 }
 
 string findModelPath() {
-  cout << "Начинаем поиск модели Vosk...\n";
+  cout << "Searching for the Vosk model...\n";
 
   string systemModelPath = "/usr/local/share/voice-assistant/model";
   if (fs::exists(systemModelPath)) {
-    cout << "Модель найдена в системной директории: " << systemModelPath
-         << "\n";
+    cout << "Model found in the system directory: " << systemModelPath << "\n";
     return systemModelPath;
   }
 
   if (fs::exists("model")) {
-    cout << "Модель найдена в текущей директории\n";
+    cout << "Model found in the current directory\n";
     return "model";
   }
 
-  cout << "Модель Vosk не найдена\n";
+  cout << "Vosk model not found\n";
   return "";
+}
+
+void signalHandler(int) {
+  if (g_assistant)
+    g_assistant->stop();
+  exit(0);
 }
 
 struct CommandInfo {
@@ -110,14 +118,36 @@ struct CommandInfo {
 
 bool VoiceAssistantWorker::executeCommandScript(const string &command_name) {
   fs::path script_path = ComPath / (command_name + ".sh");
-
-  if (!fs::exists(script_path)) {
-    cout << "Скрипт не найден: " << script_path << "\n";
+  if (!fs::exists(script_path))
     return false;
+
+  pid_t pid = fork();
+  if (pid < 0)
+    return false;
+
+  if (pid == 0) {
+    // первый дочерний
+    setsid(); // новая сессия, отрыв от терминала
+
+    pid_t pid2 = fork();
+    if (pid2 < 0)
+      exit(1);
+    if (pid2 > 0)
+      exit(0); // первый дочерний завершается
+
+    // второй дочерний — полностью отвязан
+    // закрыть стандартные дескрипторы
+    close(STDIN_FILENO);
+    close(STDOUT_FILENO);
+    close(STDERR_FILENO);
+
+    execl("/bin/bash", "bash", script_path.c_str(), nullptr);
+    exit(1);
   }
 
-  string command = script_path.string() + " &";
-  return system(command.c_str()) == 0;
+  // родитель ждёт только первого fork, он завершается мгновенно
+  waitpid(pid, nullptr, 0);
+  return true;
 }
 
 string VoiceAssistantWorker::findCommandForText(const string &text) {
@@ -209,36 +239,42 @@ VoiceAssistantWorker::extractKeywordsFromScript(const fs::path &scriptPath) {
 void VoiceAssistantWorker::loadCommands() {
   commands.clear();
 
-  if (fs::current_path() == "/usr/local/bin/voice-assistant") {
-    ComPath = fs::path(getenv("HOME")) / ".config/voice-assistant/commands";
-  } else {
-    ComPath = "commands";
-  }
+  char buf[4096];
+  ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+  const char *home = getenv("HOME");
+  if (!home)
+    home = "/tmp";
+  if (len != -1) {
+    buf[len] = '\0';
+    fs::path exePath(buf);
+    if (exePath == "/usr/local/bin/voice-assistant") {
+      ComPath = fs::path(home) / ".config/voice-assistant/commands";
+    } else {
+      ComPath = "commands";
+    }
 
-  if (!fs::exists(ComPath)) {
-    fs::create_directories(ComPath);
-    cout << "Создана директория " << ComPath.string() << "\n";
-    return;
-  }
+    if (!fs::exists(ComPath)) {
+      fs::create_directories(ComPath);
+      cout << "directory created " << ComPath.string() << "\n";
+      return;
+    }
 
-  for (auto &file : getFilesInDirectory(ComPath)) {
-    if (getFileExtension(file) == ".sh") {
-      CommandInfo cmd;
-      cmd.script_name = getFilenameWithoutExtension(file);
-      cmd.keywords = extractKeywordsFromScript(file);
+    for (auto &file : getFilesInDirectory(ComPath)) {
+      if (getFileExtension(file) == ".sh") {
+        CommandInfo cmd;
+        cmd.script_name = getFilenameWithoutExtension(file);
+        cmd.keywords = extractKeywordsFromScript(file);
 
-      if (!cmd.keywords.empty()) {
-        commands.push_back(cmd);
-        cout << "Загружена команда: " << cmd.script_name << "\n";
+        if (!cmd.keywords.empty()) {
+          commands.push_back(cmd);
+          cout << "Command loaded: " << cmd.script_name << "\n";
+        }
       }
     }
   }
 }
 
-void VoiceAssistantWorker::start() {
-  if (running)
-    return;
-
+void VoiceAssistantWorker::init() {
   string modelPath = findModelPath();
   if (modelPath.empty())
     return;
@@ -252,16 +288,34 @@ void VoiceAssistantWorker::start() {
     return;
 
   loadCommands();
-  running = true;
+}
 
+void VoiceAssistantWorker::loop() {
   while (running) {
     run();
     this_thread::sleep_for(chrono::milliseconds(50));
   }
 }
 
+void VoiceAssistantWorker::start() {
+  if (running)
+    return;
+
+  init();
+
+  if (!model || !recognizer)
+    return;
+
+  running = true;
+
+  t = std::thread([this] { loop(); });
+}
+
 void VoiceAssistantWorker::stop() {
   running = false;
+
+  if (t.joinable())
+    t.join();
 
   if (capture_handle) {
     snd_pcm_close(capture_handle);
@@ -290,7 +344,7 @@ void VoiceAssistantWorker::run() {
 
     if ((err = snd_pcm_open(&capture_handle, "default", SND_PCM_STREAM_CAPTURE,
                             0)) < 0) {
-      cout << "ALSA ошибка: " << snd_strerror(err) << "\n";
+      cout << "ALSA error: " << snd_strerror(err) << "\n";
       return;
     }
 
@@ -307,10 +361,10 @@ void VoiceAssistantWorker::run() {
     snd_pcm_hw_params_set_channels(capture_handle, params, 1);
 
     if ((err = snd_pcm_hw_params(capture_handle, params)) < 0) {
-      cout << "ALSA настройка ошибка\n";
+      snd_pcm_close(capture_handle);
+      capture_handle = nullptr;
       return;
     }
-
     alsa_initialized = true;
   }
 
@@ -333,12 +387,7 @@ void VoiceAssistantWorker::run() {
     string text = extractTextFromJson(json);
 
     if (!text.empty()) {
-      cout << "Распознано: " << text << "\n";
-
-      if (text.find("выход") != string::npos) {
-        stop();
-        return;
-      }
+      cout << "Recognized: " << text << "\n";
 
       string cmd = findCommandForText(text);
       if (!cmd.empty())
