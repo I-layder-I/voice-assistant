@@ -1,4 +1,5 @@
 #include "vosk_api.h"
+#include <CLI/CLI.hpp>
 #include <algorithm>
 #include <alsa/asoundlib.h>
 #include <atomic>
@@ -18,18 +19,23 @@
 using namespace std;
 namespace fs = std::filesystem;
 
-#define SAMPLE_RATE 16000
-#define BUFFER_SIZE 8000
+constexpr int BUFFER_SIZE = 8000;
 
 string findModelPath();
 void signalHandler(int);
 struct CommandInfo;
+struct Config {
+  string modelPath;
+  string commandsPath;
+  int sampleRate = 16000;
+};
 
 class VoiceAssistantWorker {
 public:
-  VoiceAssistantWorker()
-      : running(false), model(nullptr), recognizer(nullptr),
-        capture_handle(nullptr), alsa_initialized(false) {}
+  explicit VoiceAssistantWorker(const Config &config)
+      : modelPath(config.modelPath), commandsPath(config.commandsPath),
+        sampleRate(config.sampleRate), running(false), model(nullptr),
+        recognizer(nullptr), capture_handle(nullptr), alsa_initialized(false) {}
 
   ~VoiceAssistantWorker() { stop(); }
   bool executeCommandScript(const string &command_name);
@@ -43,11 +49,10 @@ public:
   void start();
   void stop();
   void run();
-  void init();
+  bool init();
   void loop();
+  bool isRunning() const { return running.load(); }
 
-private:
-  VoiceAssistantWorker(const VoiceAssistantWorker &) = delete;
   VoiceAssistantWorker &operator=(const VoiceAssistantWorker &) = delete;
 
   atomic<bool> running;
@@ -55,8 +60,11 @@ private:
   VoskModel *model;
   VoskRecognizer *recognizer;
 
+  fs::path modelPath;
+  fs::path commandsPath;
+  int sampleRate;
+
   vector<CommandInfo> commands;
-  fs::path ComPath;
   snd_pcm_t *capture_handle;
   bool alsa_initialized;
   thread t;
@@ -66,6 +74,10 @@ class VoiceAssistant {
   VoiceAssistantWorker worker;
 
 public:
+  bool isRunning() const { return worker.isRunning(); }
+
+  explicit VoiceAssistant(const Config &config) : worker(config) {}
+
   void start() { worker.start(); }
 
   void stop() { worker.stop(); }
@@ -75,16 +87,41 @@ public:
 
 VoiceAssistant *g_assistant = nullptr;
 
-int main() {
-  VoiceAssistant a;
+int main(int argc, char *argv[]) {
+  CLI::App app{"Voice Assistant"};
+
+  Config config;
+  bool debug = false;
+
+  app.add_option("-m,--model", config.modelPath,
+                 "Override the standard Model path");
+  app.add_option("-c,--commands", config.commandsPath,
+                 "Override the standard Commands path");
+  app.add_option("-r,--sample-rate", config.sampleRate,
+                 "Override the standard Sample Rate");
+  app.add_flag("--vosk-debug", debug, "Enable Vosk debug logs");
+
+  CLI11_PARSE(app, argc, argv)
+
+  if (debug) {
+    std::cout << "Debug enabled\n";
+    vosk_set_log_level(1);
+  } else
+    vosk_set_log_level(-1);
+
+  VoiceAssistant a(config);
   g_assistant = &a;
+
   signal(SIGINT, signalHandler);
   signal(SIGTERM, signalHandler);
 
   a.start();
-  cout << "Press Enter to exit...\n";
-  cin.get();
+
+  while (a.isRunning())
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
   a.stop();
+  return 0;
 }
 
 string findModelPath() {
@@ -117,7 +154,7 @@ struct CommandInfo {
 };
 
 bool VoiceAssistantWorker::executeCommandScript(const string &command_name) {
-  fs::path script_path = ComPath / (command_name + ".sh");
+  fs::path script_path = commandsPath / (command_name + ".sh");
   if (!fs::exists(script_path))
     return false;
 
@@ -247,19 +284,25 @@ void VoiceAssistantWorker::loadCommands() {
   if (len != -1) {
     buf[len] = '\0';
     fs::path exePath(buf);
-    if (exePath == "/usr/local/bin/voice-assistant") {
-      ComPath = fs::path(home) / ".config/voice-assistant/commands";
+    if (commandsPath.empty()) {
+      if (exePath == "/usr/local/bin/voice-assistant") {
+        commandsPath = fs::path(home) / ".config/voice-assistant/commands";
+      } else {
+        commandsPath = "commands";
+      }
+      if (!fs::exists(commandsPath)) {
+        fs::create_directories(commandsPath);
+        cout << "directory created " << commandsPath.string() << "\n";
+        return;
+      }
     } else {
-      ComPath = "commands";
+      if (!fs::exists(commandsPath)) {
+        cout << "Commands path error!!!";
+        return;
+      }
     }
 
-    if (!fs::exists(ComPath)) {
-      fs::create_directories(ComPath);
-      cout << "directory created " << ComPath.string() << "\n";
-      return;
-    }
-
-    for (auto &file : getFilesInDirectory(ComPath)) {
+    for (auto &file : getFilesInDirectory(commandsPath)) {
       if (getFileExtension(file) == ".sh") {
         CommandInfo cmd;
         cmd.script_name = getFilenameWithoutExtension(file);
@@ -274,26 +317,41 @@ void VoiceAssistantWorker::loadCommands() {
   }
 }
 
-void VoiceAssistantWorker::init() {
-  string modelPath = findModelPath();
-  if (modelPath.empty())
-    return;
+bool VoiceAssistantWorker::init() {
+  string path = modelPath;
 
-  model = vosk_model_new(modelPath.c_str());
-  if (!model)
-    return;
+  if (path.empty())
+    path = findModelPath();
 
-  recognizer = vosk_recognizer_new(model, SAMPLE_RATE);
-  if (!recognizer)
-    return;
+  if (path.empty() || !fs::exists(path)) {
+    cout << "Model path error!!!\n";
+    return false;
+  }
+
+  model = vosk_model_new(path.c_str());
+
+  if (!model) {
+    cout << "Failed to load Vosk model\n";
+    return false;
+  }
+
+  recognizer = vosk_recognizer_new(model, sampleRate);
+
+  if (!recognizer) {
+    cout << "Failed to create Vosk recognizer\n";
+    vosk_model_free(model);
+    model = nullptr;
+    return false;
+  }
 
   loadCommands();
+
+  return true;
 }
 
 void VoiceAssistantWorker::loop() {
   while (running) {
     run();
-    this_thread::sleep_for(chrono::milliseconds(50));
   }
 }
 
@@ -301,9 +359,7 @@ void VoiceAssistantWorker::start() {
   if (running)
     return;
 
-  init();
-
-  if (!model || !recognizer)
+  if (!init())
     return;
 
   running = true;
@@ -322,6 +378,8 @@ void VoiceAssistantWorker::stop() {
     capture_handle = nullptr;
   }
 
+  alsa_initialized = false;
+
   if (recognizer) {
     vosk_recognizer_free(recognizer);
     recognizer = nullptr;
@@ -334,9 +392,6 @@ void VoiceAssistantWorker::stop() {
 }
 
 void VoiceAssistantWorker::run() {
-  if (!running)
-    return;
-
   static vector<short> buffer(BUFFER_SIZE);
 
   if (!alsa_initialized) {
@@ -345,6 +400,7 @@ void VoiceAssistantWorker::run() {
     if ((err = snd_pcm_open(&capture_handle, "default", SND_PCM_STREAM_CAPTURE,
                             0)) < 0) {
       cout << "ALSA error: " << snd_strerror(err) << "\n";
+      running = false;
       return;
     }
 
@@ -356,13 +412,15 @@ void VoiceAssistantWorker::run() {
                                  SND_PCM_ACCESS_RW_INTERLEAVED);
     snd_pcm_hw_params_set_format(capture_handle, params, SND_PCM_FORMAT_S16_LE);
 
-    unsigned int rate = SAMPLE_RATE;
+    unsigned int rate = sampleRate;
     snd_pcm_hw_params_set_rate_near(capture_handle, params, &rate, nullptr);
     snd_pcm_hw_params_set_channels(capture_handle, params, 1);
 
     if ((err = snd_pcm_hw_params(capture_handle, params)) < 0) {
+      cout << "ALSA error: " << snd_strerror(err) << "\n";
       snd_pcm_close(capture_handle);
       capture_handle = nullptr;
+      running = false;
       return;
     }
     alsa_initialized = true;
