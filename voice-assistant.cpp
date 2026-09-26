@@ -21,14 +21,21 @@ namespace fs = std::filesystem;
 
 constexpr int BUFFER_SIZE = 8000;
 
-string findModelPath();
 void signalHandler(int);
 struct CommandInfo;
 struct Config {
-  string modelPath;
-  string commandsPath;
+
+  bool forceUserPaths = false;
+  bool forceUserModelPath = false;
+  bool forceUserCommandsPath = false;
+
+  fs::path modelPath;
+  fs::path commandsPath;
+
   int sampleRate = 16000;
 };
+
+void definePaths(Config &config);
 
 class VoiceAssistantWorker {
 public:
@@ -100,8 +107,16 @@ int main(int argc, char *argv[]) {
   app.add_option("-r,--sample-rate", config.sampleRate,
                  "Override the standard Sample Rate");
   app.add_flag("--vosk-debug", debug, "Enable Vosk debug logs");
+  app.add_flag("--user-paths", config.forceUserPaths,
+               "Use installed Model and Commands paths");
+  app.add_flag("--user-model", config.forceUserModelPath,
+               "Use installed Model path");
+  app.add_flag("--user-commands", config.forceUserCommandsPath,
+               "Use installed Commands path");
 
-  CLI11_PARSE(app, argc, argv)
+  CLI11_PARSE(app, argc, argv);
+
+  definePaths(config);
 
   if (debug) {
     std::cout << "Debug enabled\n";
@@ -122,24 +137,6 @@ int main(int argc, char *argv[]) {
 
   a.stop();
   return 0;
-}
-
-string findModelPath() {
-  cout << "Searching for the Vosk model...\n";
-
-  string systemModelPath = "/usr/local/share/voice-assistant/model";
-  if (fs::exists(systemModelPath)) {
-    cout << "Model found in the system directory: " << systemModelPath << "\n";
-    return systemModelPath;
-  }
-
-  if (fs::exists("model")) {
-    cout << "Model found in the current directory\n";
-    return "model";
-  }
-
-  cout << "Vosk model not found\n";
-  return "";
 }
 
 void signalHandler(int) {
@@ -220,11 +217,14 @@ string VoiceAssistantWorker::extractTextFromJson(const string &json) {
 
 vector<string> VoiceAssistantWorker::getFilesInDirectory(const fs::path &dir) {
   vector<string> files;
-  if (!fs::exists(dir))
+
+  if (!fs::is_directory(dir))
     return files;
 
-  for (auto &e : fs::directory_iterator(dir))
-    files.push_back(e.path().string());
+  for (const auto &entry : fs::directory_iterator(dir)) {
+    if (entry.is_regular_file())
+      files.push_back(entry.path().string());
+  }
 
   return files;
 }
@@ -276,59 +276,43 @@ VoiceAssistantWorker::extractKeywordsFromScript(const fs::path &scriptPath) {
 void VoiceAssistantWorker::loadCommands() {
   commands.clear();
 
-  char buf[4096];
-  ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
-  const char *home = getenv("HOME");
-  if (!home)
-    home = "/tmp";
-  if (len != -1) {
-    buf[len] = '\0';
-    fs::path exePath(buf);
-    if (commandsPath.empty()) {
-      if (exePath == "/usr/local/bin/voice-assistant") {
-        commandsPath = fs::path(home) / ".config/voice-assistant/commands";
-      } else {
-        commandsPath = "commands";
-      }
-      if (!fs::exists(commandsPath)) {
-        fs::create_directories(commandsPath);
-        cout << "directory created " << commandsPath.string() << "\n";
-        return;
-      }
-    } else {
-      if (!fs::exists(commandsPath)) {
-        cout << "Commands path error!!!";
-        return;
-      }
-    }
+  if (commandsPath.empty()) {
+    cout << "Commands path not found\n";
+    return;
+  }
 
-    for (auto &file : getFilesInDirectory(commandsPath)) {
-      if (getFileExtension(file) == ".sh") {
-        CommandInfo cmd;
-        cmd.script_name = getFilenameWithoutExtension(file);
-        cmd.keywords = extractKeywordsFromScript(file);
+  if (!fs::is_directory(commandsPath)) {
+    cout << "Invalid commands path: " << commandsPath << '\n';
+    return;
+  }
 
-        if (!cmd.keywords.empty()) {
-          commands.push_back(cmd);
-          cout << "Command loaded: " << cmd.script_name << "\n";
-        }
-      }
+  for (const auto &file : getFilesInDirectory(commandsPath)) {
+    if (getFileExtension(file) != ".sh")
+      continue;
+
+    CommandInfo cmd;
+    cmd.script_name = getFilenameWithoutExtension(file);
+    cmd.keywords = extractKeywordsFromScript(file);
+
+    if (!cmd.keywords.empty()) {
+      commands.push_back(cmd);
+      cout << "Command loaded: " << cmd.script_name << '\n';
     }
   }
 }
 
 bool VoiceAssistantWorker::init() {
-  string path = modelPath;
-
-  if (path.empty())
-    path = findModelPath();
-
-  if (path.empty() || !fs::exists(path)) {
-    cout << "Model path error!!!\n";
+  if (modelPath.empty()) {
+    cout << "Model path not found\n";
     return false;
   }
 
-  model = vosk_model_new(path.c_str());
+  if (!fs::is_directory(modelPath)) {
+    cout << "Invalid model path: " << modelPath << '\n';
+    return false;
+  }
+
+  model = vosk_model_new(modelPath.c_str());
 
   if (!model) {
     cout << "Failed to load Vosk model\n";
@@ -452,4 +436,52 @@ void VoiceAssistantWorker::run() {
         executeCommandScript(cmd);
     }
   }
+}
+
+void definePaths(Config &config) {
+  const char *home = getenv("HOME");
+
+  if (!home) {
+    cerr << "HOME environment variable is not set\n";
+    return;
+  }
+
+  fs::path userModelPath =
+      fs::path(home) / ".local/share/voice-assistant/model";
+
+  fs::path userCommandsPath =
+      fs::path(home) / ".config/voice-assistant/commands";
+
+  fs::path localModelPath = "model";
+  fs::path localCommandsPath = "commands";
+
+  // Явно указанные --model / --commands имеют наивысший приоритет
+  if (config.modelPath.empty()) {
+    if (config.forceUserPaths || config.forceUserModelPath) {
+      config.modelPath = userModelPath;
+    } else if (fs::is_directory(localModelPath)) {
+      config.modelPath = localModelPath;
+    } else if (fs::is_directory(userModelPath)) {
+      config.modelPath = userModelPath;
+    }
+  }
+
+  if (config.commandsPath.empty()) {
+    if (config.forceUserPaths || config.forceUserCommandsPath) {
+      config.commandsPath = userCommandsPath;
+    } else if (fs::is_directory(localCommandsPath)) {
+      config.commandsPath = localCommandsPath;
+    } else if (fs::is_directory(userCommandsPath)) {
+      config.commandsPath = userCommandsPath;
+    }
+  }
+
+  cout << "Model path: "
+       << (config.modelPath.empty() ? "<not found>" : config.modelPath.string())
+       << '\n';
+
+  cout << "Commands path: "
+       << (config.commandsPath.empty() ? "<not found>"
+                                       : config.commandsPath.string())
+       << '\n';
 }
