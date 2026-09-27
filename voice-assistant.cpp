@@ -19,15 +19,17 @@
 using namespace std;
 namespace fs = std::filesystem;
 
-constexpr int BUFFER_SIZE = 8000;
+constexpr int BUFFER_FRAMES = 4000;
+
+atomic<bool> shutdownRequested = false;
 
 void signalHandler(int);
 struct CommandInfo;
 struct Config {
 
-  bool forceUserPaths = false;
-  bool forceUserModelPath = false;
-  bool forceUserCommandsPath = false;
+  bool forceDefaultPaths = false;
+  bool forceDefaultModelPath = false;
+  bool forceDefaultCommandsPath = false;
 
   fs::path modelPath;
   fs::path commandsPath;
@@ -92,8 +94,6 @@ public:
   ~VoiceAssistant() { stop(); }
 };
 
-VoiceAssistant *g_assistant = nullptr;
-
 int main(int argc, char *argv[]) {
   CLI::App app{"Voice Assistant"};
 
@@ -107,12 +107,12 @@ int main(int argc, char *argv[]) {
   app.add_option("-r,--sample-rate", config.sampleRate,
                  "Override the standard Sample Rate");
   app.add_flag("--vosk-debug", debug, "Enable Vosk debug logs");
-  app.add_flag("--user-paths", config.forceUserPaths,
-               "Use installed Model and Commands paths");
-  app.add_flag("--user-model", config.forceUserModelPath,
-               "Use installed Model path");
-  app.add_flag("--user-commands", config.forceUserCommandsPath,
-               "Use installed Commands path");
+  app.add_flag("--default-paths", config.forceDefaultPaths,
+               "Use default installed Model and Commands paths");
+  app.add_flag("--default-model", config.forceDefaultModelPath,
+               "Use default installed Model path");
+  app.add_flag("--default-commands", config.forceDefaultCommandsPath,
+               "Use default installed Commands path");
 
   CLI11_PARSE(app, argc, argv);
 
@@ -125,25 +125,20 @@ int main(int argc, char *argv[]) {
     vosk_set_log_level(-1);
 
   VoiceAssistant a(config);
-  g_assistant = &a;
 
   signal(SIGINT, signalHandler);
   signal(SIGTERM, signalHandler);
 
   a.start();
 
-  while (a.isRunning())
+  while (a.isRunning() && !shutdownRequested)
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
   a.stop();
   return 0;
 }
 
-void signalHandler(int) {
-  if (g_assistant)
-    g_assistant->stop();
-  exit(0);
-}
+void signalHandler(int) { shutdownRequested = true; }
 
 struct CommandInfo {
   string script_name;
@@ -296,9 +291,20 @@ void VoiceAssistantWorker::loadCommands() {
 
     if (!cmd.keywords.empty()) {
       commands.push_back(cmd);
-      cout << "Command loaded: " << cmd.script_name << '\n';
     }
   }
+
+  cout << "Commands loaded: ";
+
+  if (!commands.empty()) {
+    cout << commands.front().script_name;
+
+    for (size_t i = 1; i < commands.size(); ++i) {
+      cout << ", " << commands[i].script_name;
+    }
+  }
+
+  cout << '\n';
 }
 
 bool VoiceAssistantWorker::init() {
@@ -376,13 +382,13 @@ void VoiceAssistantWorker::stop() {
 }
 
 void VoiceAssistantWorker::run() {
-  static vector<short> buffer(BUFFER_SIZE);
+  static vector<short> buffer(BUFFER_FRAMES);
 
   if (!alsa_initialized) {
     int err;
 
     if ((err = snd_pcm_open(&capture_handle, "default", SND_PCM_STREAM_CAPTURE,
-                            0)) < 0) {
+                            SND_PCM_NONBLOCK)) < 0) {
       cout << "ALSA error: " << snd_strerror(err) << "\n";
       running = false;
       return;
@@ -397,8 +403,33 @@ void VoiceAssistantWorker::run() {
     snd_pcm_hw_params_set_format(capture_handle, params, SND_PCM_FORMAT_S16_LE);
 
     unsigned int rate = sampleRate;
-    snd_pcm_hw_params_set_rate_near(capture_handle, params, &rate, nullptr);
-    snd_pcm_hw_params_set_channels(capture_handle, params, 1);
+
+    if ((err = snd_pcm_hw_params_set_rate_near(capture_handle, params, &rate,
+                                               nullptr)) < 0) {
+      cout << "ALSA error: " << snd_strerror(err) << "\n";
+      snd_pcm_close(capture_handle);
+      capture_handle = nullptr;
+      running = false;
+      return;
+    }
+
+    if (rate != static_cast<unsigned int>(sampleRate)) {
+      cout << "Unsupported sample rate: " << rate << " Hz, expected "
+           << sampleRate << " Hz\n";
+
+      snd_pcm_close(capture_handle);
+      capture_handle = nullptr;
+      running = false;
+      return;
+    }
+
+    if ((err = snd_pcm_hw_params_set_channels(capture_handle, params, 1)) < 0) {
+      cout << "ALSA error: " << snd_strerror(err) << "\n";
+      snd_pcm_close(capture_handle);
+      capture_handle = nullptr;
+      running = false;
+      return;
+    }
 
     if ((err = snd_pcm_hw_params(capture_handle, params)) < 0) {
       cout << "ALSA error: " << snd_strerror(err) << "\n";
@@ -407,11 +438,17 @@ void VoiceAssistantWorker::run() {
       running = false;
       return;
     }
+
     alsa_initialized = true;
   }
 
   snd_pcm_sframes_t frames =
-      snd_pcm_readi(capture_handle, buffer.data(), BUFFER_SIZE / 2);
+      snd_pcm_readi(capture_handle, buffer.data(), BUFFER_FRAMES);
+
+  if (frames == -EAGAIN) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    return;
+  }
 
   if (frames < 0) {
     frames = snd_pcm_recover(capture_handle, frames, 0);
@@ -446,33 +483,33 @@ void definePaths(Config &config) {
     return;
   }
 
-  fs::path userModelPath =
+  fs::path defaultModelPath =
       fs::path(home) / ".local/share/voice-assistant/model";
 
-  fs::path userCommandsPath =
+  fs::path defaultCommandsPath =
       fs::path(home) / ".config/voice-assistant/commands";
 
-  fs::path localModelPath = "model";
-  fs::path localCommandsPath = "commands";
+  fs::path localModelPath = "./model";
+  fs::path localCommandsPath = "./commands";
 
   // Явно указанные --model / --commands имеют наивысший приоритет
   if (config.modelPath.empty()) {
-    if (config.forceUserPaths || config.forceUserModelPath) {
-      config.modelPath = userModelPath;
+    if (config.forceDefaultPaths || config.forceDefaultModelPath) {
+      config.modelPath = defaultModelPath;
     } else if (fs::is_directory(localModelPath)) {
       config.modelPath = localModelPath;
-    } else if (fs::is_directory(userModelPath)) {
-      config.modelPath = userModelPath;
+    } else if (fs::is_directory(defaultModelPath)) {
+      config.modelPath = defaultModelPath;
     }
   }
 
   if (config.commandsPath.empty()) {
-    if (config.forceUserPaths || config.forceUserCommandsPath) {
-      config.commandsPath = userCommandsPath;
+    if (config.forceDefaultPaths || config.forceDefaultCommandsPath) {
+      config.commandsPath = defaultCommandsPath;
     } else if (fs::is_directory(localCommandsPath)) {
       config.commandsPath = localCommandsPath;
-    } else if (fs::is_directory(userCommandsPath)) {
-      config.commandsPath = userCommandsPath;
+    } else if (fs::is_directory(defaultCommandsPath)) {
+      config.commandsPath = defaultCommandsPath;
     }
   }
 
