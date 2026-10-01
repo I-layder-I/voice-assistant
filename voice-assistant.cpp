@@ -13,6 +13,9 @@
 #include <string>
 #include <sys/wait.h>
 #include <thread>
+#include <unicode/normalizer2.h>
+#include <unicode/unistr.h>
+#include <unicode/utypes.h>
 #include <unistd.h>
 #include <vector>
 
@@ -54,6 +57,8 @@ public:
   string getFilenameWithoutExtension(const string &p);
   vector<string> extractKeywordsFromScript(const fs::path &scriptPath);
   string findCommandForText(const string &text);
+  string normalizeText(const string &text);
+  string trim(const string &text);
   void loadCommands();
   void start();
   void stop();
@@ -180,8 +185,7 @@ bool VoiceAssistantWorker::executeCommandScript(const string &command_name) {
 }
 
 string VoiceAssistantWorker::findCommandForText(const string &text) {
-  string lower = text;
-  transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+  string lower = normalizeText(text);
 
   for (auto &cmd : commands) {
     for (auto &kw : cmd.keywords) {
@@ -225,19 +229,11 @@ vector<string> VoiceAssistantWorker::getFilesInDirectory(const fs::path &dir) {
 }
 
 string VoiceAssistantWorker::getFileExtension(const string &p) {
-  size_t d = p.find_last_of('.');
-  return (d == string::npos) ? "" : p.substr(d);
+  return fs::path(p).extension().string();
 }
 
 string VoiceAssistantWorker::getFilenameWithoutExtension(const string &p) {
-  size_t s = p.find_last_of('/');
-  size_t d = p.find_last_of('.');
-
-  string name = (s == string::npos) ? p : p.substr(s + 1);
-  if (d != string::npos && d > s)
-    name = name.substr(0, d - s - 1);
-
-  return name;
+  return fs::path(p).stem().string();
 }
 
 vector<string>
@@ -258,14 +254,47 @@ VoiceAssistantWorker::extractKeywordsFromScript(const fs::path &scriptPath) {
     string k;
 
     while (getline(ss, k, ',')) {
-      k.erase(remove_if(k.begin(), k.end(), ::isspace), k.end());
-      transform(k.begin(), k.end(), k.begin(), ::tolower);
+      k = normalizeText(trim(k));
+
       if (!k.empty())
         keys.push_back(k);
     }
     break;
   }
   return keys;
+}
+
+string VoiceAssistantWorker::normalizeText(const string &text) {
+  UErrorCode status = U_ZERO_ERROR;
+
+  const icu::Normalizer2 *normalizer = icu::Normalizer2::getNFCInstance(status);
+
+  if (U_FAILURE(status))
+    return text;
+
+  icu::UnicodeString unicode = icu::UnicodeString::fromUTF8(text);
+
+  unicode.toLower();
+
+  icu::UnicodeString normalized = normalizer->normalize(unicode, status);
+
+  if (U_FAILURE(status))
+    return text;
+
+  string result;
+  unicode.toUTF8String(result);
+
+  return result;
+}
+
+string VoiceAssistantWorker::trim(const string &text) {
+  size_t start = text.find_first_not_of(" \t\r\n");
+  if (start == string::npos)
+    return "";
+
+  size_t end = text.find_last_not_of(" \t\r\n");
+
+  return text.substr(start, end - start + 1);
 }
 
 void VoiceAssistantWorker::loadCommands() {
@@ -397,10 +426,29 @@ void VoiceAssistantWorker::run() {
     snd_pcm_hw_params_t *params;
     snd_pcm_hw_params_alloca(&params);
 
-    snd_pcm_hw_params_any(capture_handle, params);
-    snd_pcm_hw_params_set_access(capture_handle, params,
-                                 SND_PCM_ACCESS_RW_INTERLEAVED);
-    snd_pcm_hw_params_set_format(capture_handle, params, SND_PCM_FORMAT_S16_LE);
+    if ((err = snd_pcm_hw_params_any(capture_handle, params)) < 0) {
+      cout << "ALSA error: " << snd_strerror(err) << "\n";
+      snd_pcm_close(capture_handle);
+      capture_handle = nullptr;
+      running = false;
+      return;
+    }
+    if ((err = snd_pcm_hw_params_set_access(
+             capture_handle, params, SND_PCM_ACCESS_RW_INTERLEAVED)) < 0) {
+      cout << "ALSA error: " << snd_strerror(err) << "\n";
+      snd_pcm_close(capture_handle);
+      capture_handle = nullptr;
+      running = false;
+      return;
+    }
+    if ((err = snd_pcm_hw_params_set_format(capture_handle, params,
+                                            SND_PCM_FORMAT_S16_LE)) < 0) {
+      cout << "ALSA error: " << snd_strerror(err) << "\n";
+      snd_pcm_close(capture_handle);
+      capture_handle = nullptr;
+      running = false;
+      return;
+    }
 
     unsigned int rate = sampleRate;
 
@@ -451,7 +499,13 @@ void VoiceAssistantWorker::run() {
   }
 
   if (frames < 0) {
-    frames = snd_pcm_recover(capture_handle, frames, 0);
+    int err = snd_pcm_recover(capture_handle, frames, 0);
+
+    if (err < 0) {
+      cout << "ALSA recovery error: " << snd_strerror(err) << "\n";
+      running = false;
+    }
+
     return;
   }
 
