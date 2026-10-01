@@ -38,6 +38,7 @@ struct Config {
   fs::path commandsPath;
 
   int sampleRate = 16000;
+  bool stdinMode = false;
 };
 
 void definePaths(Config &config);
@@ -46,8 +47,9 @@ class VoiceAssistantWorker {
 public:
   explicit VoiceAssistantWorker(const Config &config)
       : modelPath(config.modelPath), commandsPath(config.commandsPath),
-        sampleRate(config.sampleRate), running(false), model(nullptr),
-        recognizer(nullptr), capture_handle(nullptr), alsa_initialized(false) {}
+        sampleRate(config.sampleRate), stdinMode(config.stdinMode),
+        running(false), model(nullptr), recognizer(nullptr),
+        capture_handle(nullptr), alsa_initialized(false) {}
 
   ~VoiceAssistantWorker() { stop(); }
   bool executeCommandScript(const string &command_name);
@@ -58,6 +60,8 @@ public:
   vector<string> extractKeywordsFromScript(const fs::path &scriptPath);
   string findCommandForText(const string &text);
   string normalizeText(const string &text);
+  void processText(const std::string &text);
+  void stdinLoop();
   string trim(const string &text);
   void loadCommands();
   void start();
@@ -77,6 +81,7 @@ public:
   fs::path modelPath;
   fs::path commandsPath;
   int sampleRate;
+  bool stdinMode;
 
   vector<CommandInfo> commands;
   snd_pcm_t *capture_handle;
@@ -111,6 +116,8 @@ int main(int argc, char *argv[]) {
                  "Override the standard Commands path");
   app.add_option("-r,--sample-rate", config.sampleRate,
                  "Override the standard Sample Rate");
+  app.add_flag("--stdin", config.stdinMode,
+               "Read commands from standard input");
   app.add_flag("--vosk-debug", debug, "Enable Vosk debug logs");
   app.add_flag("--default-paths", config.forceDefaultPaths,
                "Use default installed Model and Commands paths");
@@ -282,7 +289,7 @@ string VoiceAssistantWorker::normalizeText(const string &text) {
     return text;
 
   string result;
-  unicode.toUTF8String(result);
+  normalized.toUTF8String(result);
 
   return result;
 }
@@ -295,6 +302,28 @@ string VoiceAssistantWorker::trim(const string &text) {
   size_t end = text.find_last_not_of(" \t\r\n");
 
   return text.substr(start, end - start + 1);
+}
+
+void VoiceAssistantWorker::processText(const std::string &text) {
+  if (text.empty())
+    return;
+
+  cout << "Recognized: " << text << '\n';
+
+  string cmd = findCommandForText(text);
+
+  if (!cmd.empty())
+    executeCommandScript(cmd);
+}
+
+void VoiceAssistantWorker::stdinLoop() {
+  string text;
+
+  while (running && getline(cin, text)) {
+    processText(text);
+  }
+
+  running = false;
 }
 
 void VoiceAssistantWorker::loadCommands() {
@@ -383,7 +412,10 @@ void VoiceAssistantWorker::start() {
 
   running = true;
 
-  t = std::thread([this] { loop(); });
+  if (stdinMode)
+    t = std::thread([this] { stdinLoop(); });
+  else
+    t = std::thread([this] { loop(); });
 }
 
 void VoiceAssistantWorker::stop() {
@@ -518,14 +550,7 @@ void VoiceAssistantWorker::run() {
   if (vosk_recognizer_accept_waveform(recognizer, data, len)) {
     string json = vosk_recognizer_result(recognizer);
     string text = extractTextFromJson(json);
-
-    if (!text.empty()) {
-      cout << "Recognized: " << text << "\n";
-
-      string cmd = findCommandForText(text);
-      if (!cmd.empty())
-        executeCommandScript(cmd);
-    }
+    processText(text);
   }
 }
 
