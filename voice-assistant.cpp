@@ -4,13 +4,16 @@
 #include <alsa/asoundlib.h>
 #include <atomic>
 #include <cctype>
+#include <cerrno>
 #include <csignal>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <poll.h>
 #include <sstream>
 #include <string>
+#include <sys/poll.h>
 #include <sys/wait.h>
 #include <thread>
 #include <unicode/normalizer2.h>
@@ -63,11 +66,12 @@ public:
   void processText(const std::string &text);
   void stdinLoop();
   string trim(const string &text);
-  void loadCommands();
-  void start();
+  bool loadCommands();
+  bool start();
   void stop();
   void run();
   bool init();
+  bool initVosk();
   void loop();
   bool isRunning() const { return running.load(); }
 
@@ -97,7 +101,7 @@ public:
 
   explicit VoiceAssistant(const Config &config) : worker(config) {}
 
-  void start() { worker.start(); }
+  bool start() { return worker.start(); }
 
   void stop() { worker.stop(); }
 
@@ -141,7 +145,8 @@ int main(int argc, char *argv[]) {
   signal(SIGINT, signalHandler);
   signal(SIGTERM, signalHandler);
 
-  a.start();
+  if (!a.start())
+    return 1;
 
   while (a.isRunning() && !shutdownRequested)
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -319,24 +324,48 @@ void VoiceAssistantWorker::processText(const std::string &text) {
 void VoiceAssistantWorker::stdinLoop() {
   string text;
 
-  while (running && getline(cin, text)) {
-    processText(text);
+  while (running) {
+    pollfd pfd{};
+    pfd.fd = STDIN_FILENO;
+    pfd.events = POLLIN;
+
+    int result = poll(&pfd, 1, 100);
+
+    if (result < 0) {
+      if (errno == EINTR)
+        continue;
+
+      break;
+    }
+
+    if (result == 0)
+      continue;
+
+    if (pfd.revents & POLLIN) {
+      if (!getline(cin, text))
+        break;
+
+      processText(text);
+    }
+
+    if (pfd.revents & (POLLHUP | POLLERR | POLLNVAL))
+      break;
   }
 
   running = false;
 }
 
-void VoiceAssistantWorker::loadCommands() {
+bool VoiceAssistantWorker::loadCommands() {
   commands.clear();
 
   if (commandsPath.empty()) {
     cout << "Commands path not found\n";
-    return;
+    return false;
   }
 
   if (!fs::is_directory(commandsPath)) {
     cout << "Invalid commands path: " << commandsPath << '\n';
-    return;
+    return false;
   }
 
   for (const auto &file : getFilesInDirectory(commandsPath)) {
@@ -363,9 +392,22 @@ void VoiceAssistantWorker::loadCommands() {
   }
 
   cout << '\n';
+
+  return true;
 }
 
 bool VoiceAssistantWorker::init() {
+  if (!loadCommands())
+    return false;
+
+  if (stdinMode)
+    return true;
+
+  return initVosk();
+}
+
+bool VoiceAssistantWorker::initVosk() {
+
   if (modelPath.empty()) {
     cout << "Model path not found\n";
     return false;
@@ -392,8 +434,6 @@ bool VoiceAssistantWorker::init() {
     return false;
   }
 
-  loadCommands();
-
   return true;
 }
 
@@ -403,12 +443,12 @@ void VoiceAssistantWorker::loop() {
   }
 }
 
-void VoiceAssistantWorker::start() {
+bool VoiceAssistantWorker::start() {
   if (running)
-    return;
+    return true;
 
   if (!init())
-    return;
+    return false;
 
   running = true;
 
@@ -416,6 +456,8 @@ void VoiceAssistantWorker::start() {
     t = std::thread([this] { stdinLoop(); });
   else
     t = std::thread([this] { loop(); });
+
+  return true;
 }
 
 void VoiceAssistantWorker::stop() {
