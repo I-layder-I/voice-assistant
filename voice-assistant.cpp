@@ -20,6 +20,7 @@
 #include <unicode/unistr.h>
 #include <unicode/utypes.h>
 #include <unistd.h>
+#include <unordered_map>
 #include <vector>
 
 using namespace std;
@@ -42,6 +43,7 @@ struct Config {
 
   int sampleRate = 16000;
   bool stdinMode = false;
+  string matching = "substring";
 };
 
 void definePaths(Config &config);
@@ -51,18 +53,19 @@ public:
   explicit VoiceAssistantWorker(const Config &config)
       : modelPath(config.modelPath), commandsPath(config.commandsPath),
         sampleRate(config.sampleRate), stdinMode(config.stdinMode),
-        running(false), model(nullptr), recognizer(nullptr),
-        capture_handle(nullptr), alsa_initialized(false) {}
+        matching(config.matching), running(false), model(nullptr),
+        recognizer(nullptr), capture_handle(nullptr), alsa_initialized(false) {}
 
   ~VoiceAssistantWorker() { stop(); }
   bool executeCommandScript(const string &command_name);
   string extractTextFromJson(const string &json);
-  vector<string> getFilesInDirectory(const fs::path &dir);
-  string getFileExtension(const string &p);
-  string getFilenameWithoutExtension(const string &p);
+  vector<fs::path> getShFiles(const fs::path &dir);
   vector<string> extractKeywordsFromScript(const fs::path &scriptPath);
   string findCommandForText(const string &text);
   string normalizeText(const string &text);
+  vector<string> splitWords(const string &text);
+  bool containsWordSequence(const vector<string> &text,
+                            const vector<string> &keyword);
   void processText(const std::string &text);
   void stdinLoop();
   string trim(const string &text);
@@ -86,6 +89,7 @@ public:
   fs::path commandsPath;
   int sampleRate;
   bool stdinMode;
+  string matching;
 
   vector<CommandInfo> commands;
   snd_pcm_t *capture_handle;
@@ -122,6 +126,8 @@ int main(int argc, char *argv[]) {
                  "Override the standard Sample Rate");
   app.add_flag("--stdin", config.stdinMode,
                "Read commands from standard input");
+  app.add_option("--matching", config.matching, "Override matching")
+      ->check(CLI::IsMember({"exact", "substring"}));
   app.add_flag("--vosk-debug", debug, "Enable Vosk debug logs");
   app.add_flag("--default-paths", config.forceDefaultPaths,
                "Use default installed Model and Commands paths");
@@ -172,17 +178,14 @@ bool VoiceAssistantWorker::executeCommandScript(const string &command_name) {
     return false;
 
   if (pid == 0) {
-    // первый дочерний
-    setsid(); // новая сессия, отрыв от терминала
+    setsid();
 
     pid_t pid2 = fork();
     if (pid2 < 0)
       exit(1);
     if (pid2 > 0)
-      exit(0); // первый дочерний завершается
+      exit(0);
 
-    // второй дочерний — полностью отвязан
-    // закрыть стандартные дескрипторы
     close(STDIN_FILENO);
     close(STDOUT_FILENO);
     close(STDERR_FILENO);
@@ -191,21 +194,86 @@ bool VoiceAssistantWorker::executeCommandScript(const string &command_name) {
     exit(1);
   }
 
-  // родитель ждёт только первого fork, он завершается мгновенно
   waitpid(pid, nullptr, 0);
   return true;
 }
 
-string VoiceAssistantWorker::findCommandForText(const string &text) {
-  string lower = normalizeText(text);
+vector<string> VoiceAssistantWorker::splitWords(const string &text) {
+  vector<string> words;
+  stringstream ss(text);
+  string word;
 
-  for (auto &cmd : commands) {
-    for (auto &kw : cmd.keywords) {
-      if (lower.find(kw) != string::npos)
-        return cmd.script_name;
+  while (ss >> word)
+    words.push_back(word);
+
+  return words;
+}
+
+bool VoiceAssistantWorker::containsWordSequence(const vector<string> &text,
+                                                const vector<string> &keyword) {
+
+  if (keyword.empty() || keyword.size() > text.size())
+    return false;
+
+  for (size_t i = 0; i <= text.size() - keyword.size(); ++i) {
+    bool match = true;
+
+    for (size_t j = 0; j < keyword.size(); ++j) {
+      if (text[i + j] != keyword[j]) {
+        match = false;
+        break;
+      }
+    }
+
+    if (match) {
+      return true;
     }
   }
-  return "";
+
+  return false;
+}
+
+string VoiceAssistantWorker::findCommandForText(const string &text) {
+  string normalizedText = normalizeText(text);
+
+  vector<string> textWords = splitWords(normalizedText);
+
+  if (textWords.empty())
+    return "";
+
+  // exact
+  if (matching == "exact") {
+    for (const auto &cmd : commands) {
+      for (const auto &kw : cmd.keywords) {
+        vector<string> keywordWords = splitWords(kw);
+
+        if (keywordWords == textWords)
+          return cmd.script_name;
+      }
+    }
+
+    return "";
+  }
+
+  // substring
+  string bestCommand;
+  size_t bestKeywordWords = 0;
+
+  for (const auto &cmd : commands) {
+    for (const auto &kw : cmd.keywords) {
+      vector<string> keywordWords = splitWords(kw);
+
+      if (!containsWordSequence(textWords, keywordWords))
+        continue;
+
+      if (keywordWords.size() > bestKeywordWords) {
+        bestKeywordWords = keywordWords.size();
+        bestCommand = cmd.script_name;
+      }
+    }
+  }
+
+  return bestCommand;
 }
 
 string VoiceAssistantWorker::extractTextFromJson(const string &json) {
@@ -226,26 +294,18 @@ string VoiceAssistantWorker::extractTextFromJson(const string &json) {
   return json.substr(s + 1, e - s - 1);
 }
 
-vector<string> VoiceAssistantWorker::getFilesInDirectory(const fs::path &dir) {
-  vector<string> files;
+vector<fs::path> VoiceAssistantWorker::getShFiles(const fs::path &dir) {
+  vector<fs::path> files;
 
   if (!fs::is_directory(dir))
     return files;
 
   for (const auto &entry : fs::directory_iterator(dir)) {
-    if (entry.is_regular_file())
-      files.push_back(entry.path().string());
+    if (entry.is_regular_file() && entry.path().extension() == ".sh")
+      files.push_back(entry.path());
   }
 
   return files;
-}
-
-string VoiceAssistantWorker::getFileExtension(const string &p) {
-  return fs::path(p).extension().string();
-}
-
-string VoiceAssistantWorker::getFilenameWithoutExtension(const string &p) {
-  return fs::path(p).stem().string();
 }
 
 vector<string>
@@ -317,8 +377,10 @@ void VoiceAssistantWorker::processText(const std::string &text) {
 
   string cmd = findCommandForText(text);
 
-  if (!cmd.empty())
+  if (!cmd.empty()) {
+    cout << "Executing: " << cmd << endl;
     executeCommandScript(cmd);
+  }
 }
 
 void VoiceAssistantWorker::stdinLoop() {
@@ -358,27 +420,40 @@ void VoiceAssistantWorker::stdinLoop() {
 bool VoiceAssistantWorker::loadCommands() {
   commands.clear();
 
-  if (commandsPath.empty()) {
-    cout << "Commands path not found\n";
+  if (!fs::exists(commandsPath) || !fs::is_directory(commandsPath)) {
+    cerr << "Commands directory does not exist: " << commandsPath << '\n';
     return false;
   }
 
-  if (!fs::is_directory(commandsPath)) {
-    cout << "Invalid commands path: " << commandsPath << '\n';
-    return false;
-  }
+  unordered_map<string, string> keywordOwners;
 
-  for (const auto &file : getFilesInDirectory(commandsPath)) {
-    if (getFileExtension(file) != ".sh")
-      continue;
+  for (const auto &path : getShFiles(commandsPath)) {
 
     CommandInfo cmd;
-    cmd.script_name = getFilenameWithoutExtension(file);
-    cmd.keywords = extractKeywordsFromScript(file);
 
-    if (!cmd.keywords.empty()) {
-      commands.push_back(cmd);
+    cmd.script_name = path.stem().string();
+    cmd.keywords = extractKeywordsFromScript(path);
+
+    if (cmd.keywords.empty()) {
+      cerr << "Warning: no keywords in " << cmd.script_name << '\n';
+      continue;
     }
+
+    for (const auto &keyword : cmd.keywords) {
+      auto [it, inserted] = keywordOwners.emplace(keyword, cmd.script_name);
+
+      if (!inserted) {
+        cerr << "Error: duplicate keyword: " << keyword << '\n';
+
+        cerr << "  First command: " << it->second << '\n';
+
+        cerr << "  Second command: " << cmd.script_name << '\n';
+
+        return false;
+      }
+    }
+
+    commands.push_back(std::move(cmd));
   }
 
   cout << "Commands loaded: ";
