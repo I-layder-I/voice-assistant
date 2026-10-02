@@ -2,5 +2,5 @@
 ## Building
 ```
 g++ voice-assistant.cpp -o voice-assistant \
-    -std=c++17 -lasound -lpthread -lvosk
+    -std=c++17 -lasound -lpthread -lvosk -licuuc
 ```

@@ -658,6 +658,9 @@ void VoiceAssistantWorker::run() {
     return;
   }
 
+  if (!running)
+    return;
+
   if (frames <= 0 || !recognizer)
     return;
 
