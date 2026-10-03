@@ -57,6 +57,12 @@ public:
         recognizer(nullptr), capture_handle(nullptr), alsa_initialized(false) {}
 
   ~VoiceAssistantWorker() { stop(); }
+
+  bool start();
+  void stop();
+  bool isRunning() const { return running.load(); }
+
+  private:
   bool executeCommandScript(const string &command_name);
   string extractTextFromJson(const string &json);
   vector<fs::path> getShFiles(const fs::path &dir);
@@ -70,13 +76,10 @@ public:
   void stdinLoop();
   string trim(const string &text);
   bool loadCommands();
-  bool start();
-  void stop();
   void run();
   bool init();
   bool initVosk();
   void loop();
-  bool isRunning() const { return running.load(); }
 
   VoiceAssistantWorker &operator=(const VoiceAssistantWorker &) = delete;
 
