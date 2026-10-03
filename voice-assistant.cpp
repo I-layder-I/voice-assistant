@@ -7,6 +7,8 @@
 #include <cerrno>
 #include <csignal>
 #include <cstdlib>
+#include <cstring>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -14,6 +16,7 @@
 #include <sstream>
 #include <string>
 #include <sys/poll.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 #include <thread>
 #include <unicode/normalizer2.h>
@@ -173,31 +176,97 @@ struct CommandInfo {
 
 bool VoiceAssistantWorker::executeCommandScript(const string &command_name) {
   fs::path script_path = commandsPath / (command_name + ".sh");
+
   if (!fs::exists(script_path))
     return false;
 
-  pid_t pid = fork();
-  if (pid < 0)
+  int pipefd[2];
+
+  if (pipe(pipefd) < 0)
     return false;
 
+  int flags = fcntl(pipefd[1], F_GETFD);
+
+  if (flags < 0 || fcntl(pipefd[1], F_SETFD, flags | FD_CLOEXEC) < 0) {
+    close(pipefd[0]);
+    close(pipefd[1]);
+    return false;
+  }
+
+  pid_t pid = fork();
+
+  if (pid < 0) {
+    close(pipefd[0]);
+    close(pipefd[1]);
+    return false;
+  }
+
   if (pid == 0) {
-    setsid();
+    close(pipefd[0]);
+
+    if (setsid() < 0) {
+      int err = errno;
+
+      if (write(pipefd[1], &err, sizeof(err)) != sizeof(err))
+          _exit(1);
+
+      _exit(1);
+    }
 
     pid_t pid2 = fork();
-    if (pid2 < 0)
-      exit(1);
-    if (pid2 > 0)
-      exit(0);
+
+    if (pid2 < 0) {
+      int err = errno;
+
+      if (write(pipefd[1], &err, sizeof(err)) != sizeof(err))
+          _exit(1);
+
+      _exit(1);
+    }
+
+    if (pid2 > 0) {
+      // First child no longer needs the pipe.
+      close(pipefd[1]);
+      _exit(0);
+    }
 
     close(STDIN_FILENO);
     close(STDOUT_FILENO);
     close(STDERR_FILENO);
 
     execl("/bin/bash", "bash", script_path.c_str(), nullptr);
-    exit(1);
+
+    int err = errno;
+      if (write(pipefd[1], &err, sizeof(err)) != sizeof(err))
+          _exit(1);
+
+    _exit(1);
   }
 
-  waitpid(pid, nullptr, 0);
+  close(pipefd[1]);
+
+  int status;
+  pid_t result;
+
+  do {
+    result = waitpid(pid, &status, 0);
+  } while (result < 0 && errno == EINTR);
+
+  if (result < 0) {
+    close(pipefd[0]);
+    return false;
+  }
+
+int exec_errno = 0;
+  ssize_t bytes = read(pipefd[0], &exec_errno, sizeof(exec_errno));
+
+  close(pipefd[0]);
+
+  if (bytes > 0) {
+    cerr << "Failed to execute command '" << command_name << "': " << strerror(exec_errno) << '\n';
+    return false;
+  }
+
   return true;
 }
 
@@ -380,9 +449,13 @@ void VoiceAssistantWorker::processText(const std::string &text) {
 
   string cmd = findCommandForText(text);
 
-  if (!cmd.empty()) {
+  if (cmd.empty())
+    return;
+
     cout << "Executing: " << cmd << endl;
-    executeCommandScript(cmd);
+
+    if (!executeCommandScript(cmd)) {
+      cerr << "Failed to execute command: " << cmd << '\n';
   }
 }
 
@@ -487,26 +560,26 @@ bool VoiceAssistantWorker::init() {
 bool VoiceAssistantWorker::initVosk() {
 
   if (modelPath.empty()) {
-    cout << "Model path not found\n";
+    cerr << "Model path not found\n";
     return false;
   }
 
   if (!fs::is_directory(modelPath)) {
-    cout << "Invalid model path: " << modelPath << '\n';
+    cerr << "Invalid model path: " << modelPath << '\n';
     return false;
   }
 
   model = vosk_model_new(modelPath.c_str());
 
   if (!model) {
-    cout << "Failed to load Vosk model\n";
+    cerr << "Failed to load Vosk model\n";
     return false;
   }
 
   recognizer = vosk_recognizer_new(model, sampleRate);
 
   if (!recognizer) {
-    cout << "Failed to create Vosk recognizer\n";
+    cerr << "Failed to create Vosk recognizer\n";
     vosk_model_free(model);
     model = nullptr;
     return false;
@@ -570,7 +643,7 @@ void VoiceAssistantWorker::run() {
 
     if ((err = snd_pcm_open(&capture_handle, "default", SND_PCM_STREAM_CAPTURE,
                             SND_PCM_NONBLOCK)) < 0) {
-      cout << "ALSA error: " << snd_strerror(err) << "\n";
+      cerr << "ALSA error: " << snd_strerror(err) << "\n";
       running = false;
       return;
     }
@@ -579,7 +652,7 @@ void VoiceAssistantWorker::run() {
     snd_pcm_hw_params_alloca(&params);
 
     if ((err = snd_pcm_hw_params_any(capture_handle, params)) < 0) {
-      cout << "ALSA error: " << snd_strerror(err) << "\n";
+      cerr << "ALSA error: " << snd_strerror(err) << "\n";
       snd_pcm_close(capture_handle);
       capture_handle = nullptr;
       running = false;
@@ -587,7 +660,7 @@ void VoiceAssistantWorker::run() {
     }
     if ((err = snd_pcm_hw_params_set_access(
              capture_handle, params, SND_PCM_ACCESS_RW_INTERLEAVED)) < 0) {
-      cout << "ALSA error: " << snd_strerror(err) << "\n";
+      cerr << "ALSA error: " << snd_strerror(err) << "\n";
       snd_pcm_close(capture_handle);
       capture_handle = nullptr;
       running = false;
@@ -595,7 +668,7 @@ void VoiceAssistantWorker::run() {
     }
     if ((err = snd_pcm_hw_params_set_format(capture_handle, params,
                                             SND_PCM_FORMAT_S16_LE)) < 0) {
-      cout << "ALSA error: " << snd_strerror(err) << "\n";
+      cerr << "ALSA error: " << snd_strerror(err) << "\n";
       snd_pcm_close(capture_handle);
       capture_handle = nullptr;
       running = false;
@@ -606,7 +679,7 @@ void VoiceAssistantWorker::run() {
 
     if ((err = snd_pcm_hw_params_set_rate_near(capture_handle, params, &rate,
                                                nullptr)) < 0) {
-      cout << "ALSA error: " << snd_strerror(err) << "\n";
+      cerr << "ALSA error: " << snd_strerror(err) << "\n";
       snd_pcm_close(capture_handle);
       capture_handle = nullptr;
       running = false;
@@ -614,7 +687,7 @@ void VoiceAssistantWorker::run() {
     }
 
     if (rate != static_cast<unsigned int>(sampleRate)) {
-      cout << "Unsupported sample rate: " << rate << " Hz, expected "
+      cerr << "Unsupported sample rate: " << rate << " Hz, expected "
            << sampleRate << " Hz\n";
 
       snd_pcm_close(capture_handle);
@@ -624,7 +697,7 @@ void VoiceAssistantWorker::run() {
     }
 
     if ((err = snd_pcm_hw_params_set_channels(capture_handle, params, 1)) < 0) {
-      cout << "ALSA error: " << snd_strerror(err) << "\n";
+      cerr << "ALSA error: " << snd_strerror(err) << "\n";
       snd_pcm_close(capture_handle);
       capture_handle = nullptr;
       running = false;
@@ -632,7 +705,7 @@ void VoiceAssistantWorker::run() {
     }
 
     if ((err = snd_pcm_hw_params(capture_handle, params)) < 0) {
-      cout << "ALSA error: " << snd_strerror(err) << "\n";
+      cerr << "ALSA error: " << snd_strerror(err) << "\n";
       snd_pcm_close(capture_handle);
       capture_handle = nullptr;
       running = false;
@@ -654,7 +727,7 @@ void VoiceAssistantWorker::run() {
     int err = snd_pcm_recover(capture_handle, frames, 0);
 
     if (err < 0) {
-      cout << "ALSA recovery error: " << snd_strerror(err) << "\n";
+      cerr << "ALSA recovery error: " << snd_strerror(err) << "\n";
       running = false;
     }
 
