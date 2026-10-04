@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cerrno>
 #include <csignal>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
@@ -383,28 +384,47 @@ vector<fs::path> VoiceAssistantWorker::getShFiles(const fs::path &dir) {
 vector<string>
 VoiceAssistantWorker::extractKeywordsFromScript(const fs::path &scriptPath) {
   vector<string> keys;
+
   ifstream file(scriptPath);
+
   if (!file)
     return keys;
 
   string line;
+
   while (getline(file, line)) {
-    string marker = "# WORDS :";
-    size_t pos = line.find(marker);
-    if (pos == string::npos)
+    line = normalizeText(line);
+
+    auto markerEnd = line.find(':');
+
+    if (markerEnd == string::npos)
       continue;
 
-    stringstream ss(line.substr(pos + marker.size()));
-    string k;
+    string marker = line.substr(0, markerEnd);
 
-    while (getline(ss, k, ',')) {
-      k = normalizeText(trim(k));
+    marker.erase(
+        remove_if(marker.begin(), marker.end(),
+                  [](unsigned char c) {
+                    return std::isspace(c);
+                  }),
+        marker.end());
 
-      if (!k.empty())
-        keys.push_back(k);
+    if (marker != "#words")
+      continue;
+
+    stringstream ss(line.substr(markerEnd + 1));
+    string keyword;
+
+    while (getline(ss, keyword, ',')) {
+      keyword = trim(keyword);
+
+      if (!keyword.empty())
+        keys.push_back(keyword);
     }
+
     break;
   }
+
   return keys;
 }
 
