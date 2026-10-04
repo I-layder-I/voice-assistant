@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <poll.h>
 #include <sstream>
 #include <string>
@@ -52,13 +53,39 @@ struct Config {
 
 void definePaths(Config &config);
 
+struct VoskModelDeleter {
+  void operator()(VoskModel *model) const {
+    if (model)
+      vosk_model_free(model);
+  }
+};
+
+struct VoskRecognizerDeleter {
+  void operator()(VoskRecognizer *recognizer) const {
+    if (recognizer)
+      vosk_recognizer_free(recognizer);
+  }
+};
+
+struct PcmDeleter {
+  void operator()(snd_pcm_t *handle) const {
+    if (handle)
+      snd_pcm_close(handle);
+  }
+};
+
+using PcmPtr = unique_ptr<snd_pcm_t, PcmDeleter>;
+
+using VoskModelPtr = unique_ptr<VoskModel, VoskModelDeleter>;
+
+using VoskRecognizerPtr = unique_ptr<VoskRecognizer, VoskRecognizerDeleter>;
+
 class VoiceAssistantWorker {
 public:
   explicit VoiceAssistantWorker(const Config &config)
       : modelPath(config.modelPath), commandsPath(config.commandsPath),
         sampleRate(config.sampleRate), stdinMode(config.stdinMode),
-        matching(config.matching), running(false), model(nullptr),
-        recognizer(nullptr), capture_handle(nullptr), alsa_initialized(false) {}
+        matching(config.matching), running(false) {}
 
   ~VoiceAssistantWorker() { stop(); }
 
@@ -66,7 +93,7 @@ public:
   void stop();
   bool isRunning() const { return running.load(); }
 
-  private:
+private:
   bool executeCommandScript(const string &command_name);
   string extractTextFromJson(const string &json);
   vector<fs::path> getShFiles(const fs::path &dir);
@@ -76,7 +103,7 @@ public:
   vector<string> splitWords(const string &text);
   bool containsWordSequence(const vector<string> &text,
                             const vector<string> &keyword);
-  void processText(const std::string &text);
+  void processText(const string &text);
   void stdinLoop();
   string trim(const string &text);
   bool loadCommands();
@@ -89,8 +116,8 @@ public:
 
   atomic<bool> running;
 
-  VoskModel *model;
-  VoskRecognizer *recognizer;
+  VoskModelPtr model;
+  VoskRecognizerPtr recognizer;
 
   fs::path modelPath;
   fs::path commandsPath;
@@ -99,8 +126,9 @@ public:
   string matching;
 
   vector<CommandInfo> commands;
-  snd_pcm_t *capture_handle;
-  bool alsa_initialized;
+
+  PcmPtr capture_handle;
+
   thread t;
 };
 
@@ -148,7 +176,7 @@ int main(int argc, char *argv[]) {
   definePaths(config);
 
   if (debug) {
-    std::cout << "Debug enabled\n";
+    cout << "Debug enabled\n";
     vosk_set_log_level(1);
   } else
     vosk_set_log_level(-1);
@@ -162,7 +190,7 @@ int main(int argc, char *argv[]) {
     return 1;
 
   while (a.isRunning() && !shutdownRequested)
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    this_thread::sleep_for(chrono::milliseconds(100));
 
   a.stop();
   return 0;
@@ -209,7 +237,7 @@ bool VoiceAssistantWorker::executeCommandScript(const string &command_name) {
       int err = errno;
 
       if (write(pipefd[1], &err, sizeof(err)) != sizeof(err))
-          _exit(1);
+        _exit(1);
 
       _exit(1);
     }
@@ -220,7 +248,7 @@ bool VoiceAssistantWorker::executeCommandScript(const string &command_name) {
       int err = errno;
 
       if (write(pipefd[1], &err, sizeof(err)) != sizeof(err))
-          _exit(1);
+        _exit(1);
 
       _exit(1);
     }
@@ -238,8 +266,8 @@ bool VoiceAssistantWorker::executeCommandScript(const string &command_name) {
     execl("/bin/bash", "bash", script_path.c_str(), nullptr);
 
     int err = errno;
-      if (write(pipefd[1], &err, sizeof(err)) != sizeof(err))
-          _exit(1);
+    if (write(pipefd[1], &err, sizeof(err)) != sizeof(err))
+      _exit(1);
 
     _exit(1);
   }
@@ -258,13 +286,14 @@ bool VoiceAssistantWorker::executeCommandScript(const string &command_name) {
     return false;
   }
 
-int exec_errno = 0;
+  int exec_errno = 0;
   ssize_t bytes = read(pipefd[0], &exec_errno, sizeof(exec_errno));
 
   close(pipefd[0]);
 
   if (bytes > 0) {
-    cerr << "Failed to execute command '" << command_name << "': " << strerror(exec_errno) << '\n';
+    cerr << "Failed to execute command '" << command_name
+         << "': " << strerror(exec_errno) << '\n';
     return false;
   }
 
@@ -402,12 +431,9 @@ VoiceAssistantWorker::extractKeywordsFromScript(const fs::path &scriptPath) {
 
     string marker = line.substr(0, markerEnd);
 
-    marker.erase(
-        remove_if(marker.begin(), marker.end(),
-                  [](unsigned char c) {
-                    return std::isspace(c);
-                  }),
-        marker.end());
+    marker.erase(remove_if(marker.begin(), marker.end(),
+                           [](unsigned char c) { return isspace(c); }),
+                 marker.end());
 
     if (marker != "#words")
       continue;
@@ -461,7 +487,7 @@ string VoiceAssistantWorker::trim(const string &text) {
   return text.substr(start, end - start + 1);
 }
 
-void VoiceAssistantWorker::processText(const std::string &text) {
+void VoiceAssistantWorker::processText(const string &text) {
   if (text.empty())
     return;
 
@@ -472,10 +498,10 @@ void VoiceAssistantWorker::processText(const std::string &text) {
   if (cmd.empty())
     return;
 
-    cout << "Executing: " << cmd << endl;
+  cout << "Executing: " << cmd << endl;
 
-    if (!executeCommandScript(cmd)) {
-      cerr << "Failed to execute command: " << cmd << '\n';
+  if (!executeCommandScript(cmd)) {
+    cerr << "Failed to execute command: " << cmd << '\n';
   }
 }
 
@@ -549,7 +575,7 @@ bool VoiceAssistantWorker::loadCommands() {
       }
     }
 
-    commands.push_back(std::move(cmd));
+    commands.push_back(move(cmd));
   }
 
   cout << "Commands loaded: ";
@@ -589,19 +615,17 @@ bool VoiceAssistantWorker::initVosk() {
     return false;
   }
 
-  model = vosk_model_new(modelPath.c_str());
+  model.reset(vosk_model_new(modelPath.c_str()));
 
   if (!model) {
     cerr << "Failed to load Vosk model\n";
     return false;
   }
 
-  recognizer = vosk_recognizer_new(model, sampleRate);
+  recognizer.reset(vosk_recognizer_new(model.get(), sampleRate));
 
   if (!recognizer) {
     cerr << "Failed to create Vosk recognizer\n";
-    vosk_model_free(model);
-    model = nullptr;
     return false;
   }
 
@@ -624,9 +648,9 @@ bool VoiceAssistantWorker::start() {
   running = true;
 
   if (stdinMode)
-    t = std::thread([this] { stdinLoop(); });
+    t = thread([this] { stdinLoop(); });
   else
-    t = std::thread([this] { loop(); });
+    t = thread([this] { loop(); });
 
   return true;
 }
@@ -637,71 +661,58 @@ void VoiceAssistantWorker::stop() {
   if (t.joinable())
     t.join();
 
-  if (capture_handle) {
-    snd_pcm_close(capture_handle);
-    capture_handle = nullptr;
-  }
-
-  alsa_initialized = false;
-
-  if (recognizer) {
-    vosk_recognizer_free(recognizer);
-    recognizer = nullptr;
-  }
-
-  if (model) {
-    vosk_model_free(model);
-    model = nullptr;
-  }
+  capture_handle.reset();
+  recognizer.reset();
+  model.reset();
 }
 
 void VoiceAssistantWorker::run() {
   static vector<short> buffer(BUFFER_FRAMES);
 
-  if (!alsa_initialized) {
+  if (!capture_handle) {
     int err;
+    snd_pcm_t *handle = nullptr;
 
-    if ((err = snd_pcm_open(&capture_handle, "default", SND_PCM_STREAM_CAPTURE,
+    if ((err = snd_pcm_open(&handle, "default", SND_PCM_STREAM_CAPTURE,
                             SND_PCM_NONBLOCK)) < 0) {
       cerr << "ALSA error: " << snd_strerror(err) << "\n";
       running = false;
       return;
     }
 
+    capture_handle.reset(handle);
+
     snd_pcm_hw_params_t *params;
     snd_pcm_hw_params_alloca(&params);
 
-    if ((err = snd_pcm_hw_params_any(capture_handle, params)) < 0) {
+    if ((err = snd_pcm_hw_params_any(capture_handle.get(), params)) < 0) {
       cerr << "ALSA error: " << snd_strerror(err) << "\n";
-      snd_pcm_close(capture_handle);
-      capture_handle = nullptr;
+      capture_handle.reset();
       running = false;
       return;
     }
-    if ((err = snd_pcm_hw_params_set_access(
-             capture_handle, params, SND_PCM_ACCESS_RW_INTERLEAVED)) < 0) {
+    if ((err = snd_pcm_hw_params_set_access(capture_handle.get(), params,
+                                            SND_PCM_ACCESS_RW_INTERLEAVED)) <
+        0) {
       cerr << "ALSA error: " << snd_strerror(err) << "\n";
-      snd_pcm_close(capture_handle);
-      capture_handle = nullptr;
+      capture_handle.reset();
       running = false;
       return;
     }
-    if ((err = snd_pcm_hw_params_set_format(capture_handle, params,
+    if ((err = snd_pcm_hw_params_set_format(capture_handle.get(), params,
                                             SND_PCM_FORMAT_S16_LE)) < 0) {
       cerr << "ALSA error: " << snd_strerror(err) << "\n";
-      snd_pcm_close(capture_handle);
-      capture_handle = nullptr;
+      capture_handle.reset();
       running = false;
       return;
     }
 
     unsigned int rate = sampleRate;
 
-    if ((err = snd_pcm_hw_params_set_rate_near(capture_handle, params, &rate,
-                                               nullptr)) < 0) {
+    if ((err = snd_pcm_hw_params_set_rate_near(capture_handle.get(), params,
+                                               &rate, nullptr)) < 0) {
       cerr << "ALSA error: " << snd_strerror(err) << "\n";
-      snd_pcm_close(capture_handle);
-      capture_handle = nullptr;
+      capture_handle.reset();
       running = false;
       return;
     }
@@ -710,41 +721,37 @@ void VoiceAssistantWorker::run() {
       cerr << "Unsupported sample rate: " << rate << " Hz, expected "
            << sampleRate << " Hz\n";
 
-      snd_pcm_close(capture_handle);
-      capture_handle = nullptr;
+      capture_handle.reset();
       running = false;
       return;
     }
 
-    if ((err = snd_pcm_hw_params_set_channels(capture_handle, params, 1)) < 0) {
+    if ((err = snd_pcm_hw_params_set_channels(capture_handle.get(), params,
+                                              1)) < 0) {
       cerr << "ALSA error: " << snd_strerror(err) << "\n";
-      snd_pcm_close(capture_handle);
-      capture_handle = nullptr;
+      capture_handle.reset();
       running = false;
       return;
     }
 
-    if ((err = snd_pcm_hw_params(capture_handle, params)) < 0) {
+    if ((err = snd_pcm_hw_params(capture_handle.get(), params)) < 0) {
       cerr << "ALSA error: " << snd_strerror(err) << "\n";
-      snd_pcm_close(capture_handle);
-      capture_handle = nullptr;
+      capture_handle.reset();
       running = false;
       return;
     }
-
-    alsa_initialized = true;
   }
 
   snd_pcm_sframes_t frames =
-      snd_pcm_readi(capture_handle, buffer.data(), BUFFER_FRAMES);
+      snd_pcm_readi(capture_handle.get(), buffer.data(), BUFFER_FRAMES);
 
   if (frames == -EAGAIN) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    this_thread::sleep_for(chrono::milliseconds(10));
     return;
   }
 
   if (frames < 0) {
-    int err = snd_pcm_recover(capture_handle, frames, 0);
+    int err = snd_pcm_recover(capture_handle.get(), frames, 0);
 
     if (err < 0) {
       cerr << "ALSA recovery error: " << snd_strerror(err) << "\n";
@@ -763,8 +770,8 @@ void VoiceAssistantWorker::run() {
   const char *data = reinterpret_cast<const char *>(buffer.data());
   int len = frames * sizeof(short);
 
-  if (vosk_recognizer_accept_waveform(recognizer, data, len)) {
-    string json = vosk_recognizer_result(recognizer);
+  if (vosk_recognizer_accept_waveform(recognizer.get(), data, len)) {
+    string json = vosk_recognizer_result(recognizer.get());
     string text = extractTextFromJson(json);
     processText(text);
   }
