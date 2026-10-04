@@ -18,7 +18,7 @@ sudo install -Dm755 "$TMP/voice-assistant" \
 
 echo "Copying model..."
 install -d ~/.local/share/voice-assistant
-cp -r "$TMP/model" \
+cp -r "$TMP/models" \
 ~/.local/share/voice-assistant/
 
 echo "Copying commands..."
