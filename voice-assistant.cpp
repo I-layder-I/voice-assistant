@@ -1,3 +1,4 @@
+#include "CLI/CLI.hpp"
 #include "vosk_api.h"
 #include <CLI/CLI.hpp>
 #include <algorithm>
@@ -49,6 +50,8 @@ struct Config {
   int sampleRate = 16000;
   bool stdinMode = false;
   string matching = "substring";
+
+  string language = "ru";
 };
 
 void definePaths(Config &config);
@@ -85,7 +88,7 @@ public:
   explicit VoiceAssistantWorker(const Config &config)
       : modelPath(config.modelPath), commandsPath(config.commandsPath),
         sampleRate(config.sampleRate), stdinMode(config.stdinMode),
-        matching(config.matching), running(false) {}
+        matching(config.matching), language(config.language), running(false) {}
 
   ~VoiceAssistantWorker() { stop(); }
 
@@ -124,6 +127,7 @@ private:
   int sampleRate;
   bool stdinMode;
   string matching;
+  string language;
 
   vector<CommandInfo> commands;
 
@@ -153,23 +157,22 @@ int main(int argc, char *argv[]) {
   Config config;
   bool debug = false;
 
-  app.add_option("-m,--model", config.modelPath,
-                 "Override the standard Model path");
-  app.add_option("-c,--commands", config.commandsPath,
-                 "Override the standard Commands path");
-  app.add_option("-r,--sample-rate", config.sampleRate,
-                 "Override the standard Sample Rate");
+  app.add_option("-m,--model", config.modelPath, "Set the Model path");
+  app.add_option("-c,--commands", config.commandsPath, "Set the Commands path");
+  app.add_option("-r,--sample-rate", config.sampleRate, "Set the Sample Rate");
   app.add_flag("--stdin", config.stdinMode,
                "Read commands from standard input");
-  app.add_option("--matching", config.matching, "Override matching")
+  app.add_option("--matching", config.matching, "Set the Matching")
       ->check(CLI::IsMember({"exact", "substring"}));
   app.add_flag("--vosk-debug", debug, "Enable Vosk debug logs");
   app.add_flag("--default-paths", config.forceDefaultPaths,
-               "Use default installed Model and Commands paths");
+               "Use the default Model and Commands paths");
   app.add_flag("--default-model", config.forceDefaultModelPath,
-               "Use default installed Model path");
+               "Use the default Model path");
   app.add_flag("--default-commands", config.forceDefaultCommandsPath,
-               "Use default installed Commands path");
+               "Use the default Commands path");
+  app.add_option("--language", config.language, "Set the language")
+      ->check(CLI::IsMember({"ru", "en"}));
 
   CLI11_PARSE(app, argc, argv);
 
@@ -755,6 +758,7 @@ void VoiceAssistantWorker::run() {
 
     if (err < 0) {
       cerr << "ALSA recovery error: " << snd_strerror(err) << "\n";
+      capture_handle.reset();
       running = false;
     }
 
@@ -786,12 +790,12 @@ void definePaths(Config &config) {
   }
 
   fs::path defaultModelPath =
-      fs::path(home) / ".local/share/voice-assistant/model";
+      fs::path(home) / ".local/share/voice-assistant/models" / config.language;
 
   fs::path defaultCommandsPath =
       fs::path(home) / ".config/voice-assistant/commands";
 
-  fs::path localModelPath = "./model";
+  fs::path localModelPath = fs::path("./models") / config.language;
   fs::path localCommandsPath = "./commands";
 
   // Явно указанные --model / --commands имеют наивысший приоритет
