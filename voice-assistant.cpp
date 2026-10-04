@@ -1,4 +1,3 @@
-#include "CLI/CLI.hpp"
 #include "vosk_api.h"
 #include <CLI/CLI.hpp>
 #include <algorithm>
@@ -54,7 +53,7 @@ struct Config {
   string language = "ru";
 };
 
-void definePaths(Config &config);
+void defineCommands(Config &config);
 
 struct VoskModelDeleter {
   void operator()(VoskModel *model) const {
@@ -88,9 +87,11 @@ public:
   explicit VoiceAssistantWorker(const Config &config)
       : modelPath(config.modelPath), commandsPath(config.commandsPath),
         sampleRate(config.sampleRate), stdinMode(config.stdinMode),
-        matching(config.matching), language(config.language), running(false) {}
+        matching(config.matching), running(false) {}
 
   ~VoiceAssistantWorker() { stop(); }
+
+  void setModelPath(const fs::path &path) { modelPath = path; }
 
   bool start();
   void stop();
@@ -127,7 +128,6 @@ private:
   int sampleRate;
   bool stdinMode;
   string matching;
-  string language;
 
   vector<CommandInfo> commands;
 
@@ -136,13 +136,38 @@ private:
   thread t;
 };
 
+class ModelManager {
+public:
+  explicit ModelManager(const Config &config)
+      : language(config.language), modelPath(config.modelPath),
+        forceDefaultPaths(config.forceDefaultPaths),
+        forceDefaultModelPath(config.forceDefaultModelPath) {}
+
+  void defineModel();
+
+  const fs::path &getModelPath() const { return modelPath; }
+
+private:
+  string language;
+
+  fs::path modelPath;
+
+  bool forceDefaultPaths;
+  bool forceDefaultModelPath;
+};
+
 class VoiceAssistant {
+  ModelManager manager;
   VoiceAssistantWorker worker;
 
 public:
   bool isRunning() const { return worker.isRunning(); }
 
-  explicit VoiceAssistant(const Config &config) : worker(config) {}
+  explicit VoiceAssistant(const Config &config)
+      : manager(config), worker(config) {
+    manager.defineModel();
+    worker.setModelPath(manager.getModelPath());
+  }
 
   bool start() { return worker.start(); }
 
@@ -176,7 +201,7 @@ int main(int argc, char *argv[]) {
 
   CLI11_PARSE(app, argc, argv);
 
-  definePaths(config);
+  defineCommands(config);
 
   if (debug) {
     cout << "Debug enabled\n";
@@ -578,7 +603,7 @@ bool VoiceAssistantWorker::loadCommands() {
       }
     }
 
-    commands.push_back(move(cmd));
+    commands.push_back(std::move(cmd));
   }
 
   cout << "Commands loaded: ";
@@ -781,7 +806,7 @@ void VoiceAssistantWorker::run() {
   }
 }
 
-void definePaths(Config &config) {
+void defineCommands(Config &config) {
   const char *home = getenv("HOME");
 
   if (!home) {
@@ -789,25 +814,10 @@ void definePaths(Config &config) {
     return;
   }
 
-  fs::path defaultModelPath =
-      fs::path(home) / ".local/share/voice-assistant/models" / config.language;
-
   fs::path defaultCommandsPath =
       fs::path(home) / ".config/voice-assistant/commands";
 
-  fs::path localModelPath = fs::path("./models") / config.language;
   fs::path localCommandsPath = "./commands";
-
-  // Явно указанные --model / --commands имеют наивысший приоритет
-  if (config.modelPath.empty()) {
-    if (config.forceDefaultPaths || config.forceDefaultModelPath) {
-      config.modelPath = defaultModelPath;
-    } else if (fs::is_directory(localModelPath)) {
-      config.modelPath = localModelPath;
-    } else if (fs::is_directory(defaultModelPath)) {
-      config.modelPath = defaultModelPath;
-    }
-  }
 
   if (config.commandsPath.empty()) {
     if (config.forceDefaultPaths || config.forceDefaultCommandsPath) {
@@ -819,12 +829,34 @@ void definePaths(Config &config) {
     }
   }
 
-  cout << "Model path: "
-       << (config.modelPath.empty() ? "<not found>" : config.modelPath.string())
-       << '\n';
-
   cout << "Commands path: "
        << (config.commandsPath.empty() ? "<not found>"
                                        : config.commandsPath.string())
        << '\n';
+}
+
+void ModelManager::defineModel() {
+  const char *home = getenv("HOME");
+
+  if (!home) {
+    cerr << "HOME environment variable is not set\n";
+    return;
+  }
+
+  fs::path defaultModelPath =
+      fs::path(home) / ".local/share/voice-assistant/models" / language;
+
+  fs::path localModelPath = fs::path("./models") / language;
+
+  if (modelPath.empty()) {
+    if (forceDefaultPaths || forceDefaultModelPath) {
+      modelPath = defaultModelPath;
+    } else if (fs::is_directory(localModelPath)) {
+      modelPath = localModelPath;
+    } else if (fs::is_directory(defaultModelPath)) {
+      modelPath = defaultModelPath;
+    }
+  }
+  cout << "Model path: "
+       << (modelPath.empty() ? "<not found>" : modelPath.string()) << '\n';
 }
