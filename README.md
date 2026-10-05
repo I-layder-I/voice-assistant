@@ -1,61 +1,63 @@
 # Voice Assistant
 
-Лёгкий офлайн голосовой ассистент для Linux, написанный на C++ с использованием [Vosk](https://alphacephei.com/vosk/).
+A lightweight offline voice assistant for Linux, written in C++ using [Vosk](https://alphacephei.com/vosk/).
 
-Распознавание речи выполняется локально, без облачных сервисов. Пользовательские команды задаются обычными shell-скриптами, поэтому ассистента можно расширять без изменения исходного кода.
+Speech recognition is performed locally, without cloud services. User commands are defined using regular shell scripts, so the assistant can be extended without modifying the source code.
 
-## Возможности
+English version | [Русская версия](README.ru.md)
 
-* Офлайн распознавание речи
-* Поддержка нескольких языков и моделей Vosk
-* Пользовательские команды через shell-скрипты
-* Не требует облачных сервисов
+## Features
 
-## Требования
+- Offline speech recognition
+- Support for multiple languages and Vosk models
+- User commands through shell scripts
+- No cloud services required
 
-Для запуска:
+## Requirements
 
-* Linux
-* ALSA
-* Vosk
-* ICU
-* хотя бы одна модель Vosk
+For running:
 
-Для сборки дополнительно:
+- Linux
+- ALSA
+- Vosk
+- ICU
+- At least one Vosk model
 
-* C++23 compiler
-* CLI11
+For building additionally:
 
-## Установка
+- C++23 compiler
+- CLI11
 
-### Готовая версия
+## Installation
 
-Установочный скрипт:
+### Prebuilt version
+
+Installation script:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/I-layder-I/voice-assistant/main/install.sh | bash
 ```
 
-После установки:
+After installation:
 
 ```bash
 voice-assistant --help
 ```
 
-### Сборка из исходников
+### Build from source
 
 ```bash
 git clone https://github.com/I-layder-I/voice-assistant.git
 cd voice-assistant
 ```
 
-На Arch Linux зависимости можно установить командой:
+On Arch Linux, dependencies can be installed with:
 
 ```bash
 sudo pacman -S base-devel alsa-lib icu vosk cli11
 ```
 
-Затем собрать:
+Then build:
 
 ```bash
 g++ voice-assistant.cpp \
@@ -67,72 +69,72 @@ g++ voice-assistant.cpp \
     -licuuc
 ```
 
-## Быстрый старт
+## Quick Start
 
-Команды находятся в:
+Commands are located in:
 
 ```text
 ~/.config/voice-assistant/commands/
 ```
 
-Модели можно скачать с [официальной страницы Vosk](https://alphacephei.com/vosk/models).
+Models can be downloaded from the [official Vosk page](https://alphacephei.com/vosk/models).
 
-1. Скачайте подходящую модель с официального сайта.
-2. Распакуйте архив.
-3. Переименуйте каталог модели в код языка, например:
-
-```text
-ru
-```
-
-или:
+1. Download a suitable model from the official website.
+2. Extract the archive.
+3. Rename the model directory to the language code, for example:
 
 ```text
 en
 ```
 
-4. Поместите модель в:
+or:
+
+```text
+ru
+```
+
+4. Place the model in:
 
 ```text
 ~/.local/share/voice-assistant/models/
 ```
 
-Например:
+For example:
 
 ```text
 ~/.local/share/voice-assistant/models/
-└── ru/
+└── en/
 ```
 
-После этого:
+Then:
 
 ```bash
-voice-assistant --language ru
+voice-assistant --language en
 ```
 
-## Пользовательские команды
+## User Commands
 
-Команды являются обычными shell-скриптами.
+Commands are regular shell scripts.
 
-Пример:
+Example:
 
 ```bash
 #!/bin/bash
 
-# WORDS: открой браузер, запусти браузер
+# WORDS: open browser, run browser
 
 firefox
 ```
 
-Файл:
+File:
 
 ```text
 ~/.config/voice-assistant/commands/browser.sh
 ```
 
-Ассистент найдёт команду по указанным ключевым словам и запустит соответствующий скрипт.
+The assistant will find the command using the specified keywords and execute the corresponding script.
 
-Поддерживаются два режима сопоставления:
+Two matching modes are supported:
 
 ```bash
 voice-assistant --matching exact
@@ -142,40 +144,40 @@ voice-assistant --matching exact
 voice-assistant --matching substring
 ```
 
-Подробное описание формата команд, `WORDS`, matching и других возможностей находится в документации.
+A detailed description of the command format, `WORDS`, matching, and other features can be found in the documentation.
 
 ## CLI
 
-Основные параметры:
+Main options:
 
-| Параметр            | Описание                     |
-| ------------------- | ---------------------------- |
-| `-m, --model`       | Путь к модели Vosk           |
-| `-c, --commands`    | Путь к каталогу команд       |
-| `-r, --sample-rate` | Частота дискретизации        |
-| `--language`        | Язык распознавания           |
-| `--stdin`           | Обработка текста через stdin |
-| `--matching`        | Режим сопоставления команд   |
-| `--vosk-debug`      | Отладочный вывод Vosk        |
+| Option              | Description                    |
+| ------------------- | ------------------------------ |
+| `-m, --model`       | Path to the Vosk model         |
+| `-c, --commands`    | Path to the commands directory |
+| `-r, --sample-rate` | Sample rate                    |
+| `--language`        | Recognition language           |
+| `--stdin`           | Process text through stdin     |
+| `--matching`        | Command matching mode          |
+| `--vosk-debug`      | Vosk debug output              |
 
-Полный список:
+Full list:
 
 ```bash
 voice-assistant --help
 ```
 
-## Удаление
+## Uninstallation
 
-Если программа была установлена через установочный скрипт:
+If the program was installed using the installation script:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/I-layder-I/voice-assistant/main/uninstall.sh | bash
 ```
 
-Пользовательские модели и команды удаляются отдельно.
+User models and commands are removed separately.
 
-## Лицензия
+## License
 
-Проект распространяется под лицензией **MIT**.
+The project is distributed under the **MIT** license.
 
-Полный текст лицензии находится в файле [`LICENSE`](LICENSE).
+The full license text is available in the [`LICENSE`](LICENSE) file.
