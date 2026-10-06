@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cctype>
 #include <cerrno>
+#include <chrono>
 #include <cmath>
 #include <csignal>
 #include <cstddef>
@@ -14,6 +15,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <malloc.h>
 #include <memory>
 #include <poll.h>
 #include <sstream>
@@ -105,7 +107,7 @@ private:
   bool executeCommandScript(const string &command_name);
   string extractTextFromJson(const string &json);
   static double avgConfidenceFromJson(const string &json);
-  static bool isSilens(const short *data, int frames);
+  static bool isSilence(const short *data, int frames);
   vector<fs::path> getShFiles(const fs::path &dir);
   vector<string> extractKeywordsFromScript(const fs::path &scriptPath);
   CommandMatch findCommandForText(const string &text);
@@ -137,6 +139,8 @@ private:
   bool debug;
 
   vector<CommandInfo> commands;
+
+  chrono::steady_clock::time_point worker_start{};
 
   PcmPtr capture_handle;
 
@@ -473,7 +477,7 @@ double VoiceAssistantWorker::avgConfidenceFromJson(const string &json) {
   return n > 0 ? sum / static_cast<double>(n) : 0.0;
 }
 
-bool VoiceAssistantWorker::isSilens(const short *data, int frames) {
+bool VoiceAssistantWorker::isSilence(const short *data, int frames) {
   if (frames <= 0)
     return true;
 
@@ -734,8 +738,37 @@ bool VoiceAssistantWorker::initVosk() {
 }
 
 void VoiceAssistantWorker::loop() {
+  static auto last_trim = chrono::steady_clock::now();
+
   while (running) {
     run();
+
+    auto now = chrono::steady_clock::now();
+
+    if (now - last_trim > chrono::minutes(30)) {
+      malloc_trim(0);
+      last_trim = now;
+    }
+
+    if (now - worker_start > chrono::minutes(30)) {
+      if (debug)
+        cerr << "watchdog: recreating recognizers\n";
+
+      recognizers.clear();
+
+      for (auto &m : models) {
+        VoskRecognizerPtr r(vosk_recognizer_new(m.get(), sampleRate));
+        if (!r) {
+          cerr << "watchdog: failed to recreate recognizer\n";
+          continue;
+        }
+        vosk_recognizer_set_words(r.get(), 1);
+        recognizers.push_back(std::move(r));
+      }
+
+      malloc_trim(0);
+      worker_start = chrono::steady_clock::now();
+    }
   }
 }
 
@@ -747,6 +780,7 @@ bool VoiceAssistantWorker::start() {
     return false;
 
   running = true;
+  worker_start = chrono::steady_clock::now();
 
   if (stdinMode)
     t = thread([this] { stdinLoop(); });
@@ -758,13 +792,14 @@ bool VoiceAssistantWorker::start() {
 
 void VoiceAssistantWorker::stop() {
   running = false;
-
   if (t.joinable())
     t.join();
 
   capture_handle.reset();
   recognizers.clear();
   models.clear();
+
+  worker_start = chrono::steady_clock::now();
 }
 
 void VoiceAssistantWorker::run() {
@@ -869,8 +904,16 @@ void VoiceAssistantWorker::run() {
   if (frames <= 0 || recognizers.empty())
     return;
 
-  if (isSilens(buffer.data(), static_cast<int>(frames))) {
+  static int silent_streak = 0;
+
+  if (isSilence(buffer.data(), static_cast<int>(frames))) {
     memset(buffer.data(), 0, frames * sizeof(short));
+
+    if (++silent_streak < 10)
+      return;
+    silent_streak = 0;
+  } else {
+    silent_streak = 0;
   }
 
   const char *data = reinterpret_cast<const char *>(buffer.data());
@@ -1011,3 +1054,7 @@ void ModelManager::defineModel() {
   if (modelPaths.empty())
     cerr << "No models resolved\n";
 }
+
+  
+                                 
+  
