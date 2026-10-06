@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cctype>
 #include <cerrno>
+#include <cmath>
 #include <csignal>
 #include <cstddef>
 #include <cstdlib>
@@ -17,7 +18,6 @@
 #include <poll.h>
 #include <sstream>
 #include <string>
-#include <sys/poll.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <thread>
@@ -37,20 +37,24 @@ atomic<bool> shutdownRequested = false;
 
 void signalHandler(int);
 struct CommandInfo;
+struct CommandMatch {
+  string script_name;
+  size_t keyword_words = 0;
+};
 struct Config {
-
   bool forceDefaultPaths = false;
   bool forceDefaultModelPath = false;
   bool forceDefaultCommandsPath = false;
+  bool debug = false;
 
-  fs::path modelPath;
+  vector<fs::path> modelPaths;
   fs::path commandsPath;
 
   int sampleRate = 16000;
   bool stdinMode = false;
   string matching = "substring";
 
-  string language = "ru";
+  vector<string> languages = {"en"};
 };
 
 void defineCommands(Config &config);
@@ -85,13 +89,13 @@ using VoskRecognizerPtr = unique_ptr<VoskRecognizer, VoskRecognizerDeleter>;
 class VoiceAssistantWorker {
 public:
   explicit VoiceAssistantWorker(const Config &config)
-      : modelPath(config.modelPath), commandsPath(config.commandsPath),
+      : modelPaths(config.modelPaths), commandsPath(config.commandsPath),
         sampleRate(config.sampleRate), stdinMode(config.stdinMode),
-        matching(config.matching), running(false) {}
+        matching(config.matching), debug(config.debug), running(false) {}
 
   ~VoiceAssistantWorker() { stop(); }
 
-  void setModelPath(const fs::path &path) { modelPath = path; }
+  void setModelPaths(const vector<fs::path> &paths) { modelPaths = paths; }
 
   bool start();
   void stop();
@@ -100,14 +104,16 @@ public:
 private:
   bool executeCommandScript(const string &command_name);
   string extractTextFromJson(const string &json);
+  static double avgConfidenceFromJson(const string &json);
+  static bool isSilens(const short *data, int frames);
   vector<fs::path> getShFiles(const fs::path &dir);
   vector<string> extractKeywordsFromScript(const fs::path &scriptPath);
-  string findCommandForText(const string &text);
+  CommandMatch findCommandForText(const string &text);
   string normalizeText(const string &text);
   vector<string> splitWords(const string &text);
   bool containsWordSequence(const vector<string> &text,
                             const vector<string> &keyword);
-  void processText(const string &text);
+  void processText(const string &text, const string &cmd);
   void stdinLoop();
   string trim(const string &text);
   bool loadCommands();
@@ -120,14 +126,15 @@ private:
 
   atomic<bool> running;
 
-  VoskModelPtr model;
-  VoskRecognizerPtr recognizer;
+  vector<VoskModelPtr> models;
+  vector<VoskRecognizerPtr> recognizers;
 
-  fs::path modelPath;
+  vector<fs::path> modelPaths;
   fs::path commandsPath;
   int sampleRate;
   bool stdinMode;
   string matching;
+  bool debug;
 
   vector<CommandInfo> commands;
 
@@ -139,18 +146,18 @@ private:
 class ModelManager {
 public:
   explicit ModelManager(const Config &config)
-      : language(config.language), modelPath(config.modelPath),
+      : languages(config.languages), modelPaths(config.modelPaths),
         forceDefaultPaths(config.forceDefaultPaths),
         forceDefaultModelPath(config.forceDefaultModelPath) {}
 
   void defineModel();
 
-  const fs::path &getModelPath() const { return modelPath; }
+  const vector<fs::path> &getModelPaths() const { return modelPaths; }
 
 private:
-  string language;
+  vector<string> languages;
 
-  fs::path modelPath;
+  vector<fs::path> modelPaths;
 
   bool forceDefaultPaths;
   bool forceDefaultModelPath;
@@ -166,7 +173,7 @@ public:
   explicit VoiceAssistant(const Config &config)
       : manager(config), worker(config) {
     manager.defineModel();
-    worker.setModelPath(manager.getModelPath());
+    worker.setModelPaths(manager.getModelPaths());
   }
 
   bool start() { return worker.start(); }
@@ -180,30 +187,41 @@ int main(int argc, char *argv[]) {
   CLI::App app{"Voice Assistant"};
 
   Config config;
-  bool debug = false;
+  vector<fs::path> cliModels;
+  vector<string> cliLanguages;
 
-  app.add_option("-m,--model", config.modelPath, "Set the Model path");
+  app.add_option("-m,--model", cliModels,
+                 "Set the Model(s) path(s); repeatable (--model "
+                 "/path/to/model/ --model /path/)");
   app.add_option("-c,--commands", config.commandsPath, "Set the Commands path");
   app.add_option("-r,--sample-rate", config.sampleRate, "Set the Sample Rate");
   app.add_flag("--stdin", config.stdinMode,
                "Read commands from standard input");
   app.add_option("--matching", config.matching, "Set the Matching")
       ->check(CLI::IsMember({"exact", "substring"}));
-  app.add_flag("--vosk-debug", debug, "Enable Vosk debug logs");
+  app.add_flag("--debug", config.debug, "Enable debug logs");
   app.add_flag("--default-paths", config.forceDefaultPaths,
                "Use the default Model and Commands paths");
   app.add_flag("--default-model", config.forceDefaultModelPath,
                "Use the default Model path");
   app.add_flag("--default-commands", config.forceDefaultCommandsPath,
                "Use the default Commands path");
-  app.add_option("--language", config.language, "Set the language")
-      ->check(CLI::IsMember({"ru", "en"}));
+  app.add_option(
+         "--language", cliLanguages,
+         "Set the language(s); repeatable (--language en --language ru)")
+      ->check(CLI::IsMember({"en", "ru"}));
 
   CLI11_PARSE(app, argc, argv);
 
+  if (!cliModels.empty())
+    config.modelPaths = cliModels;
+
+  if (!cliLanguages.empty())
+    config.languages = cliLanguages;
+
   defineCommands(config);
 
-  if (debug) {
+  if (config.debug) {
     cout << "Debug enabled\n";
     vosk_set_log_level(1);
   } else
@@ -363,47 +381,37 @@ bool VoiceAssistantWorker::containsWordSequence(const vector<string> &text,
   return false;
 }
 
-string VoiceAssistantWorker::findCommandForText(const string &text) {
+CommandMatch VoiceAssistantWorker::findCommandForText(const string &text) {
   string normalizedText = normalizeText(text);
-
   vector<string> textWords = splitWords(normalizedText);
 
   if (textWords.empty())
-    return "";
+    return {};
 
-  // exact
-  if (matching == "exact") {
-    for (const auto &cmd : commands) {
-      for (const auto &kw : cmd.keywords) {
-        vector<string> keywordWords = splitWords(kw);
-
-        if (keywordWords == textWords)
-          return cmd.script_name;
-      }
-    }
-
-    return "";
-  }
-
-  // substring
-  string bestCommand;
-  size_t bestKeywordWords = 0;
+  CommandMatch best;
+  size_t bestLen = 0;
 
   for (const auto &cmd : commands) {
     for (const auto &kw : cmd.keywords) {
       vector<string> keywordWords = splitWords(kw);
 
-      if (!containsWordSequence(textWords, keywordWords))
+      bool ok = false;
+      if (matching == "exact")
+        ok = (keywordWords == textWords);
+      else
+        ok = containsWordSequence(textWords, keywordWords);
+
+      if (!ok)
         continue;
 
-      if (keywordWords.size() > bestKeywordWords) {
-        bestKeywordWords = keywordWords.size();
-        bestCommand = cmd.script_name;
+      if (keywordWords.size() > bestLen) {
+        bestLen = keywordWords.size();
+        best = {cmd.script_name, bestLen};
       }
     }
   }
 
-  return bestCommand;
+  return best;
 }
 
 string VoiceAssistantWorker::extractTextFromJson(const string &json) {
@@ -416,12 +424,68 @@ string VoiceAssistantWorker::extractTextFromJson(const string &json) {
     return "";
 
   size_t s = json.find("\"", p);
-  size_t e = json.find("\"", s + 1);
+  if (s == string::npos)
+    return "";
 
-  if (s == string::npos || e == string::npos)
+  size_t e = json.find("\"", s + 1);
+  if (e == string::npos)
     return "";
 
   return json.substr(s + 1, e - s - 1);
+}
+
+double VoiceAssistantWorker::avgConfidenceFromJson(const string &json) {
+  double sum = 0.0;
+  int n = 0;
+  const string key = "\"conf\"";
+  size_t pos = 0;
+
+  while ((pos = json.find(key, pos)) != string::npos) {
+    pos += key.size();
+
+    size_t colon = json.find(':', pos);
+    if (colon == string::npos)
+      break;
+
+    size_t start = json.find_first_of("-0123456789.", colon + 1);
+    if (start == string::npos)
+      break;
+
+    size_t end = start;
+    while (end < json.size()) {
+      char c = json[end];
+      if (isdigit((unsigned char)c) || c == '.' || c == '-' || c == '+' ||
+          c == 'e' || c == 'E')
+        ++end;
+      else
+        break;
+    }
+
+    try {
+      sum += stod(json.substr(start, end - start));
+      ++n;
+    } catch (...) {
+    }
+
+    pos = end;
+  }
+
+  return n > 0 ? sum / static_cast<double>(n) : 0.0;
+}
+
+bool VoiceAssistantWorker::isSilens(const short *data, int frames) {
+  if (frames <= 0)
+    return true;
+
+  double sum = 0.0;
+  for (int i = 0; i < frames; ++i) {
+    double v = static_cast<double>(data[i]);
+    sum += v * v;
+  }
+
+  double rms = std::sqrt(sum / frames);
+
+  return rms < 500.0;
 }
 
 vector<fs::path> VoiceAssistantWorker::getShFiles(const fs::path &dir) {
@@ -515,17 +579,11 @@ string VoiceAssistantWorker::trim(const string &text) {
   return text.substr(start, end - start + 1);
 }
 
-void VoiceAssistantWorker::processText(const string &text) {
-  if (text.empty())
+void VoiceAssistantWorker::processText(const string &text, const string &cmd) {
+  if (text.empty() || cmd.empty())
     return;
 
   cout << "Recognized: " << text << '\n';
-
-  string cmd = findCommandForText(text);
-
-  if (cmd.empty())
-    return;
-
   cout << "Executing: " << cmd << endl;
 
   if (!executeCommandScript(cmd)) {
@@ -557,7 +615,9 @@ void VoiceAssistantWorker::stdinLoop() {
       if (!getline(cin, text))
         break;
 
-      processText(text);
+      CommandMatch m = findCommandForText(text);
+      if (!m.script_name.empty())
+        processText(text, m.script_name);
     }
 
     if (pfd.revents & (POLLHUP | POLLERR | POLLNVAL))
@@ -632,28 +692,41 @@ bool VoiceAssistantWorker::init() {
 }
 
 bool VoiceAssistantWorker::initVosk() {
-
-  if (modelPath.empty()) {
-    cerr << "Model path not found\n";
+  if (modelPaths.empty()) {
+    cerr << "No model paths configured\n";
     return false;
   }
 
-  if (!fs::is_directory(modelPath)) {
-    cerr << "Invalid model path: " << modelPath << '\n';
-    return false;
+  models.clear();
+  recognizers.clear();
+
+  for (const auto &path : modelPaths) {
+    if (!fs::is_directory(path)) {
+      cerr << "Invalid model path: " << path << '\n';
+      return false;
+    }
+
+    VoskModelPtr m(vosk_model_new(path.c_str()));
+    if (!m) {
+      cerr << "Failed to load Vosk model: " << path << '\n';
+      return false;
+    }
+
+    VoskRecognizerPtr r(vosk_recognizer_new(m.get(), sampleRate));
+    if (!r) {
+      cerr << "Failed to create recognizer for: " << path << '\n';
+      return false;
+    }
+
+    vosk_recognizer_set_words(r.get(), 1);
+
+    cout << "Model " << path << ": loaded\n";
+    models.push_back(std::move(m));
+    recognizers.push_back(std::move(r));
   }
 
-  model.reset(vosk_model_new(modelPath.c_str()));
-
-  if (!model) {
-    cerr << "Failed to load Vosk model\n";
-    return false;
-  }
-
-  recognizer.reset(vosk_recognizer_new(model.get(), sampleRate));
-
-  if (!recognizer) {
-    cerr << "Failed to create Vosk recognizer\n";
+  if (recognizers.empty()) {
+    cerr << "No usable recognizers\n";
     return false;
   }
 
@@ -690,8 +763,8 @@ void VoiceAssistantWorker::stop() {
     t.join();
 
   capture_handle.reset();
-  recognizer.reset();
-  model.reset();
+  recognizers.clear();
+  models.clear();
 }
 
 void VoiceAssistantWorker::run() {
@@ -793,16 +866,83 @@ void VoiceAssistantWorker::run() {
   if (!running)
     return;
 
-  if (frames <= 0 || !recognizer)
+  if (frames <= 0 || recognizers.empty())
     return;
+
+  if (isSilens(buffer.data(), static_cast<int>(frames))) {
+    memset(buffer.data(), 0, frames * sizeof(short));
+  }
 
   const char *data = reinterpret_cast<const char *>(buffer.data());
   int len = frames * sizeof(short);
 
-  if (vosk_recognizer_accept_waveform(recognizer.get(), data, len)) {
-    string json = vosk_recognizer_result(recognizer.get());
-    string text = extractTextFromJson(json);
-    processText(text);
+  bool anyFinal = false;
+  vector<string> finalJsons(recognizers.size());
+
+  for (size_t i = 0; i < recognizers.size(); ++i) {
+    if (vosk_recognizer_accept_waveform(recognizers[i].get(), data, len)) {
+      const char *j = vosk_recognizer_result(recognizers[i].get());
+      if (j)
+        finalJsons[i] = j;
+      anyFinal = true;
+    }
+  }
+
+  if (!anyFinal)
+    return;
+
+  struct Hit {
+    size_t idx;
+    string text;
+    double conf;
+    CommandMatch match;
+  };
+  vector<Hit> hits;
+
+  for (size_t i = 0; i < recognizers.size(); ++i) {
+    if (finalJsons[i].empty()) {
+      const char *j = vosk_recognizer_final_result(recognizers[i].get());
+      if (j)
+        finalJsons[i] = j;
+    }
+    vosk_recognizer_reset(recognizers[i].get());
+
+    if (finalJsons[i].empty())
+      continue;
+
+    string t = extractTextFromJson(finalJsons[i]);
+    if (t.empty())
+      continue;
+
+    Hit h{i, std::move(t), avgConfidenceFromJson(finalJsons[i]), {}};
+    h.match = findCommandForText(h.text);
+    hits.push_back(std::move(h));
+  }
+
+  if (debug) {
+    for (const auto &h : hits)
+      cout << "[" << h.idx << "] conf=" << h.conf
+           << " kw=" << h.match.keyword_words << " cmd=\""
+           << h.match.script_name << "\""
+           << " text=\"" << h.text << "\"\n";
+  }
+
+  sort(hits.begin(), hits.end(), [](const Hit &a, const Hit &b) {
+    if (a.match.keyword_words != b.match.keyword_words)
+      return a.match.keyword_words > b.match.keyword_words;
+    return a.conf > b.conf;
+  });
+
+  constexpr double MIN_CONF = 0.7;
+
+  for (const auto &h : hits) {
+    if (h.match.script_name.empty())
+      continue;
+    if (h.conf < MIN_CONF)
+      continue;
+
+    processText(h.text, h.match.script_name);
+    break;
   }
 }
 
@@ -836,6 +976,8 @@ void defineCommands(Config &config) {
 }
 
 void ModelManager::defineModel() {
+  modelPaths.clear();
+
   const char *home = getenv("HOME");
 
   if (!home) {
@@ -843,20 +985,29 @@ void ModelManager::defineModel() {
     return;
   }
 
-  fs::path defaultModelPath =
-      fs::path(home) / ".local/share/voice-assistant/models" / language;
+  for (const auto &lang : languages) {
+    fs::path defaultModelPath =
+        fs::path(home) / ".local/share/voice-assistant/models" / lang;
+    fs::path localModelPath = fs::path("./models") / lang;
+    fs::path chosen;
 
-  fs::path localModelPath = fs::path("./models") / language;
-
-  if (modelPath.empty()) {
     if (forceDefaultPaths || forceDefaultModelPath) {
-      modelPath = defaultModelPath;
+      chosen = defaultModelPath;
     } else if (fs::is_directory(localModelPath)) {
-      modelPath = localModelPath;
+      chosen = localModelPath;
     } else if (fs::is_directory(defaultModelPath)) {
-      modelPath = defaultModelPath;
+      chosen = defaultModelPath;
     }
+
+    if (chosen.empty() || !fs::is_directory(chosen)) {
+      cerr << "Model for language '" << lang << "' not found\n";
+      continue;
+    }
+
+    modelPaths.push_back(chosen);
+    cout << "Model (" << lang << "): " << chosen << '\n';
   }
-  cout << "Model path: "
-       << (modelPath.empty() ? "<not found>" : modelPath.string()) << '\n';
+
+  if (modelPaths.empty())
+    cerr << "No models resolved\n";
 }

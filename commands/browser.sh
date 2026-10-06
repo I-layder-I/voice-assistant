@@ -1,3 +1,3 @@
-# WORDS: открой браузер, браузер
+# WORDS: открой браузер, браузер, open browser, browser
 #!/bin/bash
 firefox
