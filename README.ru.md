@@ -26,6 +26,8 @@
 Для сборки дополнительно:
 
 - C++23 compiler
+- CMake
+- Nlohmann/json
 - CLI11
 
 ## Установка
@@ -54,19 +56,14 @@ cd voice-assistant
 На Arch Linux зависимости можно установить командой:
 
 ```bash
-sudo pacman -S base-devel alsa-lib icu vosk cli11
+sudo pacman -S base-devel alsa-lib cmake icu vosk cli11 nlohmann-json
 ```
 
 Затем собрать:
 
 ```bash
-g++ voice-assistant.cpp \
-    -o build/voice-assistant \
-    -std=c++23 \
-    -lasound \
-    -pthread \
-    -lvosk \
-    -licuuc
+cmake -B build
+cmake --build build
 ```
 
 ## Быстрый старт

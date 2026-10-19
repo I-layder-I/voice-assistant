@@ -26,6 +26,8 @@ For running:
 For building additionally:
 
 - C++23 compiler
+- CMake
+- Nlohmann/json
 - CLI11
 
 ## Installation
@@ -54,19 +56,14 @@ cd voice-assistant
 On Arch Linux, dependencies can be installed with:
 
 ```bash
-sudo pacman -S base-devel alsa-lib icu vosk cli11
+sudo pacman -S base-devel alsa-lib cmake icu vosk cli11 nlohmann-json
 ```
 
 Then build:
 
 ```bash
-g++ voice-assistant.cpp \
-    -o build/voice-assistant \
-    -std=c++23 \
-    -lasound \
-    -pthread \
-    -lvosk \
-    -licuuc
+cmake -B build
+cmake --build build
 ```
 
 ## Quick Start
