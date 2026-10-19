@@ -56,7 +56,7 @@ cd voice-assistant
 На Arch Linux зависимости можно установить командой:
 
 ```bash
-sudo pacman -S base-devel alsa-lib cmake icu vosk cli11 nlohmann-json
+sudo pacman -S base-devel alsa-lib cmake icu vosk-api cli11 nlohmann-json
 ```
 
 Затем собрать:

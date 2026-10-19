@@ -56,7 +56,7 @@ cd voice-assistant
 On Arch Linux, dependencies can be installed with:
 
 ```bash
-sudo pacman -S base-devel alsa-lib cmake icu vosk cli11 nlohmann-json
+sudo pacman -S base-devel alsa-lib cmake icu vosk-api cli11 nlohmann-json
 ```
 
 Then build:
