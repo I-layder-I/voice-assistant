@@ -1,3 +1,11 @@
+# Build directories
+build/
 release/
-voice-assistant
-models/
+
+# CMake
+compile_commands.json
+CMakeCache.txt
+CMakeFiles/
+
+# Clangd cache
+.cache/

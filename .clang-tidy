@@ -1,0 +1,5 @@
+Checks: >
+  bugprone-*, performance-*, modernize-*, misc-*, -modernize-use-trailing-return-type, -bugprone-easily-swappable-parameters, -misc-non-private-member-variables-in-classes, -misc-no-recursion
+
+HeaderFilterRegex: "^.*/src/.*"
+WarningsAsErrors: ""
