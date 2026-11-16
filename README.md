@@ -71,7 +71,7 @@ cmake --build build
 Commands are located in:
 
 ```text
-~/.config/voice-assistant/commands/
+~/.local/share/voice-assistant/commands/
 ```
 
 Models can be downloaded from the [official Vosk page](https://alphacephei.com/vosk/models).
@@ -126,7 +126,7 @@ firefox
 File:
 
 ```text
-~/.config/voice-assistant/commands/browser.sh
+~/.local/share/voice-assistant/commands/
 ```
 
 The assistant will find the command using the specified keywords and execute the corresponding script.
@@ -147,15 +147,19 @@ A detailed description of the command format, `WORDS`, matching, and other featu
 
 Main options:
 
-| Option              | Description                    |
-| ------------------- | ------------------------------ |
-| `-m, --model`       | Path to the Vosk model         |
-| `-c, --commands`    | Path to the commands directory |
-| `-r, --sample-rate` | Sample rate                    |
-| `--language`        | Recognition language           |
-| `--stdin`           | Process text through stdin     |
-| `--matching`        | Command matching mode          |
-| `--vosk-debug`      | Vosk debug output              |
+| Option               | Description                                      |
+| -------------------- | ------------------------------------------------ |
+| `-m, --model`        | Path to a Vosk model (repeatable)                |
+| `-c, --commands`     | Path to the commands directory                   |
+| `-r, --sample-rate`  | Audio sample rate                                |
+| `-l, --language`     | Recognition language (repeatable)                |
+| `--stdin`            | Process text from standard input                 |
+| `--matching`         | Command matching mode (`exact` or `substring`)   |
+| `--min-confidence`   | Minimum Vosk recognition confidence              |
+| `--log-level`        | Logging level (`debug`, `info`, `warn`, `error`) |
+| `--default-paths`    | Force default paths for models and commands      |
+| `--default-model`    | Force the default model path                     |
+| `--default-commands` | Force the default commands path                  |
 
 Full list:
 
